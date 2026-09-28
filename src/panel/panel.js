@@ -3183,14 +3183,16 @@ async function getState() {
     })),
     // Per-website custom entries (live derivation from the Settings URL
     // list — runtime additions render in the Sessions grid of the running
-    // panel without a restart; the parent CW toggle gates them all).
+    // panel without a restart. Always listed (like every other service): the
+    // parent CW toggle only flips active:false — which parks the cards in
+    // the inactive drawer with disabled buttons, instead of vanishing from
+    // the grid entirely (they'd be impossible to find/enable).
     ...getCustomSites()
-      .filter(e => active.has(e.id))
       .map(e => ({
         id: e.id,
         name: e.name,
         version: e.version || null,
-        active: true,
+        active: active.has(e.id),
         scheduleKind: e.scheduleKind || null,
         lastSuccessfulRun: lastRunSuccess[e.id] || null,
         siteUrl: e.homeUrl || e.loginUrl || null,
