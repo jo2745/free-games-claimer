@@ -51,9 +51,10 @@
 // metadata-only and safe to ignore.
 
 import path from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { devices } from 'patchright';
 import { cfg } from './config.js';
-import { ROOT_DIR, RUNNER_NAME_RE, platformFile } from './paths.js';
+import { ROOT_DIR, RUNNER_NAME_RE, platformFile, dataDir } from './paths.js';
 
 // Resolves a runner through the '#platforms/*' alias in package.json, so the
 // directory is declared once and serves both `import` and the spawned
@@ -104,6 +105,25 @@ async function readMicrosoftRewardsUser(page) {
     console.log(`[ms] readUser: ${e.message}`);
   }
   return null;
+}
+
+// Read the custom-website URL list live from data/config.json (the single
+// source of truth the Settings tab writes) — never from the module-load cfg
+// snapshot: the panel is a long-lived process, so a URL added after boot must
+// be visible to the Sessions login flow + post-run session check without a
+// restart. Newline- or comma-separated in the file; returned as a list.
+function readCustomWebsiteUrls() {
+  try {
+    const file = dataDir('config.json');
+    if (!existsSync(file)) return [];
+    const raw = readFileSync(file, 'utf8');
+    if (!raw.trim()) return [];
+    const config = JSON.parse(raw) || {};
+    const value = config.services?.['custom-website']?.customUrls ?? '';
+    return String(value).split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+  } catch {
+    return []; // unreadable/absent config ⇒ treat as unconfigured
+  }
 }
 
 export const SITES = [
@@ -825,6 +845,59 @@ export const SITES = [
     ],
     checkLogin: null,
   },
+  {
+    id: 'custom-website',
+    name: 'Custom websites',
+    version: '0.1',
+    subtitle: 'Visit user-defined URLs in the shared browser profile as part of the daily chain — for sites that award points/coins on a daily logged-in visit (Temu, Lenovo, …). Add URLs below; log in to each site once via the Sessions tab, and the panel flags you if a session goes stale.',
+    script: platformScript('custom-website'),
+    claimOrder: 10.5, // last in the chain — after all claimers and MS; light browser visits
+    // Live file read (never the module-load cfg snapshot — the panel is a
+    // long-lived process and Settings saves land in data/config.json at
+    // runtime): first configured URL, or about:blank so the Sessions Login
+    // button still opens a browser before the user has added any URLs.
+    get loginUrl() { return readCustomWebsiteUrls()[0] || 'about:blank'; },
+    get browserDir() { return cfg.dir.browser; },
+    contextOptions: null,
+    defaultActive: false,
+    activeEnv: 'CW_ACTIVE',
+    linkedWith: null,
+    claimDbFile: null,
+    scheduleKind: 'daily-chain',
+    features: [],
+    configFields: [
+      { key: 'customUrls', env: 'CUSTOM_URLS', type: 'string', default: '',
+        label: 'Websites to visit (one per line)',
+        multiline: true,
+        hint: 'Any http(s) URL the shared browser should visit on each run — for sites that award points/coins just for a daily logged-in visit. Log in to each site once via the Sessions tab (or noVNC); the shared browser profile holds the session, and the panel notifies you if a session goes stale. Newline- or comma-separated; also settable via the CUSTOM_URLS env var.' },
+    ],
+    checkLogin: async (page) => {
+      // Generic sign-in probe (the structural heuristic fab.js / aliexpress.js
+      // rely on: a visible sign-in control ⇒ not logged in) — the only
+      // generic check that works for *arbitrary* user-configured sites.
+      const urls = readCustomWebsiteUrls();
+      if (!urls.length) return { loggedIn: false, error: 'no custom websites configured (Settings → Services → Custom websites)' };
+      const first = urls[0];
+      // checkSiteStatus opens a bare page (panel does not navigate for us),
+      // and the interactive flow may have opened about:blank when no URLs
+      // were configured at launch — always land on the first configured
+      // URL unless we are already on it (interactive flow: user just
+      // logged in there; re-navigating would drop in-page state).
+      if (page.url() !== first) {
+        try { await page.goto(first, { waitUntil: 'domcontentloaded' }); } catch { /* goto error ⇒ treated as not-logged-in below */ }
+      }
+      const sel = 'a[href*="/login" i], a[href*="/signin" i], a:has-text("Log in"), a:has-text("Sign in"), button:has-text("Log in"), button:has-text("Sign in")';
+      const n = await page.locator(sel).count().catch(() => 0);
+      let visible = 0;
+      for (let i = 0; i < n; i++) {
+        try { if (await page.locator(sel).nth(i).isVisible()) visible++; } catch { /* detached mid-check */ }
+      }
+      let host = '';
+      try { host = new URL(first).hostname; } catch { host = first; }
+      if (visible > 0) return { loggedIn: false, user: host };
+      return { loggedIn: true, user: `custom site (${host})` };
+    },
+  },
 ];
 
 export const SITES_BY_ID = Object.fromEntries(SITES.map(s => [s.id, s]));
@@ -964,9 +1037,12 @@ export function getServiceRows() {
       row.fields = (s.configFields || []).map(f => {
         const path = f.schedulerScope ? f.path : `services.${s.id}.${f.key}`;
         const extra = {};
-        if (f.unit)   extra.unit   = f.unit;
-        if (f.hint)   extra.hint   = f.hint;
-        if (f.prefix) extra.prefix = f.prefix;
+        if (f.unit)     extra.unit     = f.unit;
+        if (f.hint)     extra.hint     = f.hint;
+        if (f.prefix)   extra.prefix   = f.prefix;
+        // Multi-line free text (e.g. the custom-website URL list) renders
+        // as a textarea in fieldRow instead of a single-line input.
+        if (f.multiline) extra.multiline = true;
         if (f.kind === 'hour-of-day') extra.options = HOURS_OF_DAY;
         // Generic options pass-through for enum-style configFields. The
         // service entry supplies `options` as a list of { value, label }

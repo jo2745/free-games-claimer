@@ -4,6 +4,21 @@ Release notes for [Feldorn's Free Games Claimer](README.md). Most recent at the 
 
 ---
 
+## What's new in 2.12.5.1
+
+**Feature: custom websites — visit any URLs you name, in the shared browser, on every run.**
+
+A growing number of storefronts and apps (Temu, Lenovo, …) award points or coins for simply being logged in and visiting a page each day — no game to claim, no flow to script. This release adds a generic **Custom websites** service so you can cover that class of site without waiting for a per-site script:
+
+- **Add any URL** in Settings → Services → Custom websites (one per line, in a textarea — also settable via the `CUSTOM_URLS` env var for compose-only deploys). The URLs are visited in the shared browser profile on every run of the main claim chain (runs last, after all claimers and Microsoft Rewards), so the sites' "daily login" beacons fire while you're logged in.
+- **Log in once, ride the shared profile.** Each custom site gets a real Sessions-tab entry: click its Login button to land in a noVNC browser on the first configured URL, do the login (incl. 2FA/captcha) by hand, and the session persists in the shared profile for every future run.
+- **Generic sign-in probe.** Arbitrary sites can't have a hand-written login check, so the panel verifies sessions with a structural heuristic (a visible sign-in control ⇒ stale) — the same pattern the project already relies on for unknown third-party UIs (FAB, AliExpress). A stale custom-site session surfaces in the Alerts tab and in the post-run Pushover deep-links exactly like any other service, so you get pinged the moment a login expires.
+- **Opt-in, zero blast radius.** The service is off by default (`CW_ACTIVE`) and has no runner/URLs to speak of until you configure one — existing deploys' behavior is byte-identical. When no URLs are configured the runner no-ops cleanly instead of failing the run.
+
+Files: `src/platforms/custom-website.js` (new runner), `src/sites.js` (registry entry + live `data/config.json` read so URLs added after boot are visible to the Sessions flow without a restart), `src/config.js` (`custom_urls`), `src/util.js` (`visited` summary metric), `README.md` / `docs/CONFIGURATION.md` (env + feature docs).
+
+---
+
 ## What's new in 2.12.5
 
 **Fix: Tier-2 auto-dismiss now actually clears one-off script errors.**

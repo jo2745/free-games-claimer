@@ -21,6 +21,7 @@ const steam = svc['steam']        || {};
 const ae    = svc['aliexpress']   || {};
 const ms    = svc['microsoft']    || {};
 const lenovo = svc['lenovo-gaming'] || {};
+const cw    = svc['custom-website'] || {};
 
 // LANG is POSIX (e.g. de_DE.UTF-8); Playwright wants a BCP-47 tag (de-DE).
 // Strip the encoding, swap _ → -. C / POSIX / unparsable → '' (caller falls
@@ -199,6 +200,12 @@ export const cfg = {
   // helps the at-drop wake punch through DnD/quiet-hours on supporting
   // notifiers (Pushover most notably).
   lenovo_notify_priority: lenovo.notifyPriority || 'normal',
+  // Custom websites (v2.12.5.1): user-defined URLs visited in the shared
+  // browser profile on every run — for sites that award points/coins on a
+  // daily logged-in visit. Raw string (newline- or comma-separated); the
+  // runner splits it. Settings → Services → Custom websites wins over the
+  // CUSTOM_URLS env var; env stays as a fallback for compose-only deploys.
+  custom_urls: String(cw.customUrls ?? process.env.CUSTOM_URLS ?? ''),
   // CAPTCHA opt-in (v2.11.0 / 2D). Zero effect when unset — the solver
   // helpers early-return null and callers keep today's fail-and-diag
   // behaviour. Only when CAPTCHA_API_KEY is set does any provider HTTP

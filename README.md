@@ -30,6 +30,7 @@ Services are grouped by what they actually do.
 |---|---|
 | 🎯 [Microsoft Rewards](https://rewards.bing.com) | Daily Bing searches + activity cards for points, with before/after balance tracking |
 | 🛒 [AliExpress](https://m.aliexpress.com) | Daily check-in coins *(opt-in; disabled by default; **deprecated** — see [Bot detection](docs/REFERENCE.md#bot-detection--what-works-what-doesnt))* |
+| 🌐 **Custom websites** *(v2.12.5.1+)* | Visit any user-defined URLs in the shared browser profile on every run — for sites that award points/coins just for a daily logged-in visit (Temu, Lenovo, …). Add URLs in Settings → Services → Custom websites, or via the `CUSTOM_URLS` env var. Log in to each site once via the Sessions tab; the panel flags stale sessions. *(opt-in; default off)* |
 
 **Watchers** — notify-only; surface new free items so you can grab them yourself:
 
@@ -63,6 +64,7 @@ Uses [patchright](https://github.com/nicbarker/patchright) (Chromium with built-
 - **Captcha pause + noVNC handoff** — when a script can't solve a challenge, it pauses for 10 min, fires a deep-link push notification, and resumes when you solve it via the embedded noVNC viewer.
 - **Cookie upload fallback** — for accounts fingerprint-blocked from in-container login: paste a JSON cookie export from your desktop browser and the panel imports the session.
 - **Steam-lookup quality filter** *(v2.12.0+)* — opt-in cross-service pre-claim gate. Consults Steam once per game for the user-review score, Metacritic score, and base price, then skips titles below your threshold (default 5/10 score, $2 base price). Applies to any subset of `epic-games / gog / steam / prime-gaming / fab` you list. Results cached 30 days. Solves the "free game with 12 negative reviews still takes a library slot" problem without pulling shovelware you'd never have bought. Default OFF — existing deploys keep claiming everything.
+- **Custom websites** *(v2.12.5.1+)* — visit any user-defined URLs in the shared browser profile on every scheduled run. For the long tail of sites that award points/coins for simply logging in daily (Temu, Lenovo, …): add the URLs in Settings → Services → Custom websites (one per line) or via `CUSTOM_URLS`, log in to each site once through the Sessions tab (or noVNC), and the runner visits them in the shared profile on every run — the post-run session check then notifies you if any login went stale.
 
 ### 🎛 Control panel & UI *(where you spend your time when you do look)*
 

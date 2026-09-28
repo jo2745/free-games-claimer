@@ -786,6 +786,7 @@ export const log = {
       new:          'new',
       failed:       'failed',
       needsAction:  'needs manual redeem',
+      visited:      'visited',
     };
     const o = opts || {};
     const claimed = o.claimed ?? 0;
