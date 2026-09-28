@@ -7,7 +7,7 @@ import { datetime, notify, jsonDb, normalizeTitle, cleanProfileLocks, readDigest
 import { launchContext } from '#src/browser.js';
 import { cfg } from '#src/config.js';
 import { describeConfig, patchConfig, describeEnv, getSchedulerConfig, CONFIG_FILE_PATH, readConfigFile, writeConfigFile, setByPath as cfgSetByPath, deleteByPath as cfgDeleteByPath } from '#src/app-config.js';
-import { SITES as SITE_REGISTRY, getLoginSitesById, getClaimScriptOrder, getLinkedActiveMap, getClaimDbFiles, getServiceRows, normalizeClaimCommand } from '#src/sites.js';
+import { SITES as SITE_REGISTRY, getLoginSitesById, getClaimScriptOrder, getLinkedActiveMap, getClaimDbFiles, getServiceRows, normalizeClaimCommand, getCustomSites, getCustomLoginSites } from '#src/sites.js';
 import { fetchGamerPowerGiveaways, filterFor as filterGpFor, COLLECTOR_PATTERNS as GP_COLLECTOR_PATTERNS, GP_TITLE_HINTS } from '#src/gamerpower.js';
 import { fetchFGFPosts, filterFor as filterFgfFor, cleanTitle as fgfCleanTitle, COLLECTOR_TITLE_PATTERNS as FGF_COLLECTOR_PATTERNS } from '#src/freegamefindings.js';
 import { WATCHER_SOURCES, SOURCE_PRIORITY, loadAllWatcherProducts } from '#src/discoveries.js';
@@ -299,6 +299,25 @@ async function login() {
 // full registry too.
 const SITES = getLoginSitesById();
 
+// Runtime-derived per-website custom entries (Settings → Custom websites URL
+// list, one entry per URL). The module-load SITES snapshot can't see URLs
+// added via Settings after boot — these resolve live (data/config.json
+// read) at every lookup, so login / session-check / claim-chain / Sessions
+// rows all pick up runtime changes without a container restart.
+function customSiteEntry(siteId) {
+  return siteId.startsWith('custom-') ? getCustomLoginSites()[siteId] || null : null;
+}
+function siteName(siteId) {
+  return SITES[siteId]?.name || customSiteEntry(siteId)?.name || siteId;
+}
+// Per-site custom Run: the runner (custom-website.js) reads CUSTOM_SITE_ID
+// and visits only the listed websites; without it, a per-card Run on ONE
+// Sessions row would visit every configured custom site.
+function customSiteFilter(sites) {
+  const ids = (sites || []).filter(id => typeof id === 'string' && id.startsWith('custom-') && id !== 'custom-website');
+  return ids.length ? { CUSTOM_SITE_ID: ids.join(',') } : null;
+}
+
 let activeBrowser = null;
 const siteStatus = {};
 for (const id of Object.keys(SITES)) {
@@ -318,14 +337,14 @@ async function launchSite(siteId) {
   // when two ?login=epic-games hits 2 s apart left the second context
   // dangling and blocked MS for the rest of the morning.
   if (activeBrowser && activeBrowser.siteId === siteId) {
-    const site = SITES[siteId];
-    console.log(`[${datetime()}] Browser already open for ${site.name} — reusing existing session.`);
-    return { success: true, site: siteId, name: site.name, reused: true };
+    const site = SITES[siteId] || customSiteEntry(siteId);
+    console.log(`[${datetime()}] Browser already open for ${site?.name || siteId} — reusing existing session.`);
+    return { success: true, site: siteId, name: site?.name || siteId, reused: true };
   }
   if (activeBrowser) {
     await closeBrowser();
   }
-  const site = SITES[siteId];
+  const site = SITES[siteId] || customSiteEntry(siteId);
   if (!site) throw new Error(`Unknown site: ${siteId}`);
 
   console.log(`[${datetime()}] Launching browser for ${site.name}...`);
@@ -370,7 +389,8 @@ async function verifyAndClose() {
     return { success: false, error: 'No browser is currently open.' };
   }
   const { siteId, context, page } = activeBrowser;
-  const site = SITES[siteId];
+  const site = SITES[siteId] || customSiteEntry(siteId);
+  if (!site) return { success: false, error: `Unknown site: ${siteId}` };
 
   console.log(`[${datetime()}] Verifying login for ${site.name}...`);
 
@@ -390,7 +410,7 @@ async function verifyAndClose() {
 
 async function closeBrowser() {
   if (!activeBrowser) return;
-  console.log(`[${datetime()}] Closing browser for ${SITES[activeBrowser.siteId].name}.`);
+  console.log(`[${datetime()}] Closing browser for ${siteName(activeBrowser.siteId)}.`);
   try {
     await activeBrowser.context.close();
   } catch {}
@@ -400,7 +420,7 @@ async function closeBrowser() {
 let checkInProgress = false;
 
 async function checkSiteStatus(siteId) {
-  const site = SITES[siteId];
+  const site = SITES[siteId] || customSiteEntry(siteId);
   if (!site) return { loggedIn: false, error: 'Unknown site' };
 
   const busy = browserBusy();
@@ -475,7 +495,7 @@ function normalizeCookieEntry(c) {
 }
 
 async function importSiteCookies(siteId, rawCookies) {
-  const site = SITES[siteId];
+  const site = SITES[siteId] || customSiteEntry(siteId);
   if (!site) throw new Error(`Unknown site: ${siteId}`);
   if (!site.loginUrl) throw new Error(`${site.name} has no login flow — cookie import doesn't apply`);
 
@@ -1115,7 +1135,13 @@ function activeServices() {
     if (s && typeof s.active === 'boolean') return s.active;
     return entry.defaultActive;
   };
-  return new Set(SITE_REGISTRY.filter(isActive).map(s => s.id));
+  const set = new Set(SITE_REGISTRY.filter(isActive).map(s => s.id));
+  // Per-website custom entries: the parent 'custom-website' toggle (file >
+  // env > default, per describeConfig merge) gates ALL of them.
+  if (svc['custom-website']?.active === true) {
+    for (const e of getCustomSites()) set.add(e.id);
+  }
+  return set;
 }
 
 // Build the shell command for a claim run.
@@ -1135,6 +1161,14 @@ function buildClaimCommand({ manual = false, sites = null } = {}) {
     // is in the target set.
     const ids = [entry.id].concat(entry.linkedWith ? [entry.linkedWith] : []);
     if (ids.some(id => targetSet.has(id))) parts.push('node ' + entry.script);
+  }
+  // Per-website custom targets: the claim chain only has the parent
+  // 'custom-website' entry, but a per-card Run targets the per-site id(s)
+  // (custom-<slug>), which the loop above can't match — without this, a
+  // per-site Run built an empty command. The runner scopes itself via
+  // CUSTOM_SITE_ID (set in runAllScripts) to exactly the requested sites.
+  if (sites && [...targetSet].some(id => id.startsWith('custom-')) && !parts.includes('node src/platforms/custom-website.js')) {
+    parts.push('node src/platforms/custom-website.js');
   }
   return parts.length ? parts.join('; ') : null;
 }
@@ -1772,7 +1806,9 @@ function clearFinishedSteamRedeem() {
 async function checkAllSites() {
   const results = {};
   const active = activeServices();
-  for (const siteId of Object.keys(SITES)) {
+  const custom = getCustomLoginSites();
+  const ids = [...Object.keys(SITES), ...Object.keys(custom)];
+  for (const siteId of ids) {
     if (!active.has(siteId)) continue; // skip deactivated services
     if (activeBrowser) {
       results[siteId] = { error: 'Browser session active, close it first.' };
@@ -2539,14 +2575,14 @@ async function postRunSessionCheck() {
     console.log(`[${datetime()}] Scheduler: all sessions valid.`);
     return;
   }
-  const names = stale.map(id => SITES[id]?.name || id);
+  const names = stale.map(id => siteName(id));
   console.log(`[${datetime()}] Scheduler: stale sessions detected — ${names.join(', ')}.`);
   // Plain-text body; Pushover strips HTML but auto-linkifies full URLs, so
   // we put one URL per line per site and keep the text on separate lines.
   const plural = stale.length > 1 ? 's' : '';
   const lines = [`Free Games Claimer — ${stale.length} session${plural} expired. Tap to log in:`];
   for (const siteId of stale) {
-    const name = SITES[siteId]?.name || siteId;
+    const name = siteName(siteId);
     lines.push(`- ${name}: ${PUBLIC_URL}/?login=${encodeURIComponent(siteId)}`);
   }
   const body = lines.join('<br>');
@@ -3126,7 +3162,8 @@ async function getState() {
     // /novnc/* when auth is active. envStillActive helps the Settings UI
     // explain the "cleared config but env keeps it on" case.
     authState: { active: authIsActive(), source: authSource() },
-    sites: Object.entries(SITES).map(([id, site]) => ({
+    sites: [
+    ...Object.entries(SITES).map(([id, site]) => ({
       id,
       name: site.name,
       version: site.version || null,
@@ -3144,6 +3181,22 @@ async function getState() {
       siteUrl: site.homeUrl || site.loginUrl || null,
       ...siteStatus[id],
     })),
+    // Per-website custom entries (live derivation from the Settings URL
+    // list — runtime additions render in the Sessions grid of the running
+    // panel without a restart; the parent CW toggle gates them all).
+    ...getCustomSites()
+      .filter(e => active.has(e.id))
+      .map(e => ({
+        id: e.id,
+        name: e.name,
+        version: e.version || null,
+        active: true,
+        scheduleKind: e.scheduleKind || null,
+        lastSuccessfulRun: lastRunSuccess[e.id] || null,
+        siteUrl: e.homeUrl || e.loginUrl || null,
+        ...(siteStatus[e.id] || { status: 'unknown', user: null, checkedAt: null }),
+      })),
+    ],
     // Active watch-only collectors (scheduleKind: 'watch-only'). They are
     // not in `sites` because they have no checkLogin / session state, but
     // the Sessions tab renders them as compact "Run" cards next to the
@@ -3152,7 +3205,7 @@ async function getState() {
     watchers: SITE_REGISTRY
       .filter(s => s.scheduleKind === 'watch-only' && active.has(s.id))
       .map(s => ({ id: s.id, name: s.name, version: s.version || null, siteUrl: s.homeUrl || s.loginUrl || null })),
-    activeBrowser: activeBrowser ? { site: activeBrowser.siteId, name: SITES[activeBrowser.siteId].name } : null,
+    activeBrowser: activeBrowser ? { site: activeBrowser.siteId, name: siteName(activeBrowser.siteId) } : null,
     allLoggedIn,
     runStatus,
     runSource,
@@ -3488,7 +3541,7 @@ async function getStatsSummary() {
     lastClaim: latest ? {
       at: datetime(latest.at),
       service: latest.service,
-      serviceName: (SITES[latest.service] && SITES[latest.service].name) || DISCOVERY_DISPLAY_NAMES[latest.service] || latest.service,
+      serviceName: siteName(latest.service) || DISCOVERY_DISPLAY_NAMES[latest.service] || latest.service,
       title: latest.title,
       url: latest.url,
     } : null,
@@ -3532,7 +3585,7 @@ async function getStatsByService() {
   }
   return Object.values(rows).map(r => ({
     ...r,
-    name: (SITES[r.id] && SITES[r.id].name) || DISCOVERY_DISPLAY_NAMES[r.id] || r.id,
+    name: siteName(r.id) || DISCOVERY_DISPLAY_NAMES[r.id] || r.id,
   }));
 }
 
@@ -3567,7 +3620,7 @@ async function getStatsDaily(days = 30) {
     byDate[key].count++;
     byDate[key].items.push({
       service: c.service,
-      serviceName: (SITES[c.service] && SITES[c.service].name) || DISCOVERY_DISPLAY_NAMES[c.service] || c.service,
+      serviceName: siteName(c.service) || DISCOVERY_DISPLAY_NAMES[c.service] || c.service,
       title: c.title,
     });
   }
@@ -3580,7 +3633,7 @@ async function getActivity(limit = 10) {
   return claims.slice(0, limit).map(c => ({
     at: datetime(c.at),
     service: c.service,
-    serviceName: (SITES[c.service] && SITES[c.service].name) || DISCOVERY_DISPLAY_NAMES[c.service] || c.service,
+    serviceName: siteName(c.service) || DISCOVERY_DISPLAY_NAMES[c.service] || c.service,
     title: c.title,
     url: c.url,
     status: c.status,
@@ -9723,7 +9776,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && req.url === '/api/launch') {
       const { site } = await parseBody(req);
-      if (!site || !SITES[site]) {
+      if (!site || !(SITES[site] || customSiteEntry(site))) {
         sendJson(res, { success: false, error: 'Invalid site.' }, 400);
         return;
       }
@@ -9750,7 +9803,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && req.url === '/api/check') {
       const { site } = await parseBody(req);
-      if (!site || !SITES[site]) {
+      if (!site || !(SITES[site] || customSiteEntry(site))) {
         sendJson(res, { error: 'Invalid site.' }, 400);
         return;
       }
@@ -9790,7 +9843,7 @@ const server = http.createServer(async (req, res) => {
         ? body.sites.filter(s => typeof s === 'string' && s)
         : null;
       await expireStaleActiveBrowser();
-      const result = runAllScripts({ source: 'panel', sites: sites && sites.length ? sites : null });
+      const result = runAllScripts({ source: 'panel', sites: sites && sites.length ? sites : null, extraEnv: customSiteFilter(sites) });
       sendJson(res, result);
       return;
     }
@@ -9806,7 +9859,7 @@ const server = http.createServer(async (req, res) => {
         // microsoft and microsoft-mobile are both served by microsoft.js;
         // passing either ID runs the shared script once.
         await expireStaleActiveBrowser();
-        const result = runAllScripts({ source: 'panel', sites: [site] });
+        const result = runAllScripts({ source: 'panel', sites: [site], extraEnv: customSiteFilter([site]) });
         sendJson(res, result);
       } catch (e) {
         sendJson(res, { success: false, error: e.message }, 400);
@@ -11269,17 +11322,17 @@ server.listen(PANEL_PORT, async () => {
   // Walk active sites in alphabetical name order — matches the Sessions
   // grid card sort, so the boot-time progress indicator and the rendered
   // tile order line up. Falls back to id when name is missing.
-  const siteIds = Object.keys(SITES)
-    .filter(id => active.has(id))
-    .sort((a, b) => (SITES[a].name || a).localeCompare(SITES[b].name || b, undefined, { sensitivity: 'base' }));
+  const customIds = Object.keys(getCustomLoginSites()).filter(id => active.has(id));
+  const siteIds = [...Object.keys(SITES).filter(id => active.has(id)), ...customIds]
+    .sort((a, b) => siteName(a).localeCompare(siteName(b), undefined, { sensitivity: 'base' }));
   startupAutoCheck = { current: 0, total: siteIds.length, siteName: '' };
   for (const siteId of siteIds) {
-    startupAutoCheck.siteName = SITES[siteId].name;
+    startupAutoCheck.siteName = siteName(siteId);
     await checkSiteStatus(siteId);
     startupAutoCheck.current++;
   }
   startupAutoCheck = null;
-  console.log(`[${datetime()}] Auto-check complete (${siteIds.length} active, ${Object.keys(SITES).length - siteIds.length} skipped).`);
+  console.log(`[${datetime()}] Auto-check complete (${siteIds.length} active, ${(Object.keys(SITES).length + customIds.length) - siteIds.length} skipped).`);
 
   // Kick off the two scheduler loops after session auto-check so first runs
   // see fresh status. Loops always start — disabled paths park inside

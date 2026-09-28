@@ -4,6 +4,23 @@ Release notes for [Feldorn's Free Games Claimer](README.md). Most recent at the 
 
 ---
 
+## What's new in 2.12.5.2
+
+**Custom websites: one isolated browser profile per website — a captcha on one site can't poison the others.**
+
+v2.12.5.1 visited all custom URLs in the *shared* browser profile — the same cookie jar Epic, Steam, and Prime already live in. That's wrong as soon as any one custom site gets a captcha, a bot-wall, or a stale login: the block/stale state sits in the shared profile and starts breaking the unrelated stores (and vice versa). This release gives **every configured website its own `data/browser-custom-<host>` profile** and its own Sessions-tab row:
+
+- **Isolation.** A captcha-walled, blocked, or unreachable site now fails *only itself* — the runner visits each remaining site in its own profile, and the post-run summary reports per-site ✓/✗. Your Epic/Steam/Prime sessions (shared profile) and the other custom sites (their own profiles) are untouched.
+- **Per-site tracking.** Every website you add becomes its own Sessions-tab card with its own Login button, its own session check, and its own stale-session alert line — the panel flags *exactly which site* went stale, and the post-run Pushover deep-link opens that site's login flow. Each site's sign-in probe is pinned to its own URL (the generic visible-sign-in-control heuristic, verified on the site's own page in its own profile).
+- **Runtime additions still work.** As before, URLs added via Settings after boot are picked up live (the per-site entries re-derive from `data/config.json` on every poll/run) — no container restart needed, and each new site gets its own profile + row automatically.
+- **Per-site Runs.** The Run button on one site's card visits only that site (`CUSTOM_SITE_ID` scoping); Run All / the claim chain visits all of them.
+
+If you adopted 2.12.5.1 and logged custom sites in via the shared profile: re-login is required once per site (the per-site profiles start empty) — log in to each via its new Sessions row, and from then on the sessions are properly isolated.
+
+Files: `src/platforms/custom-website.js` (per-site loop + `CUSTOM_SITE_ID` scoping), `src/sites.js` (per-site entry derivation, generic per-site sign-in probe, parent entry demoted to a settings/runner carrier), `src/panel/panel.js` (live per-site merge into Sessions rows, session checks, run/launch/verify/close, run-all/run-service scoping, startup auto-check), `src/config.js` (`cw_active` for the runner gate), `README.md` / `docs/CONFIGURATION.md`.
+
+---
+
 ## What's new in 2.12.5.1
 
 **Feature: custom websites — visit any URLs you name, in the shared browser, on every run.**

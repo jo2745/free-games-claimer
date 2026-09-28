@@ -107,12 +107,15 @@ async function readMicrosoftRewardsUser(page) {
   return null;
 }
 
-// Read the custom-website URL list live from data/config.json (the single
-// source of truth the Settings tab writes) — never from the module-load cfg
-// snapshot: the panel is a long-lived process, so a URL added after boot must
-// be visible to the Sessions login flow + post-run session check without a
-// restart. Newline- or comma-separated in the file; returned as a list.
-function readCustomWebsiteUrls() {
+// Live read of the per-website custom-site entries from data/config.json —
+// the single source of truth the Settings tab writes. One entry per
+// configured URL: each website gets its OWN browser profile (isolated
+// session cookies), so a captcha, block, or stale login on one site can't
+// poison the others. Read on every call (never the module-load cfg
+// snapshot): the panel is a long-lived process, so a URL added via Settings
+// after boot must be visible to the Sessions tab / session-check / claim
+// chain on the NEXT poll without a container restart.
+function readCustomSiteEntries() {
   try {
     const file = dataDir('config.json');
     if (!existsSync(file)) return [];
@@ -120,10 +123,80 @@ function readCustomWebsiteUrls() {
     if (!raw.trim()) return [];
     const config = JSON.parse(raw) || {};
     const value = config.services?.['custom-website']?.customUrls ?? '';
-    return String(value).split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    const urls = String(value).split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    const entries = [];
+    urls.forEach((url, i) => {
+      let slug;
+      try { slug = new URL(url).hostname.toLowerCase(); } catch { slug = null; }
+      if (!slug) slug = `site-${i + 1}`;
+      slug = (slug.replace(/[^a-z0-9.-]/g, '-') || `site-${i + 1}`) || `site-${i + 1}`;
+      const id = `custom-${slug}`;
+      const name = (() => { try { return new URL(url).hostname; } catch { return url; } })();
+      entries.push({
+        id,
+        name,
+        version: '0.1',
+        url,
+        script: platformScript('custom-website'),
+        claimOrder: 10.5,
+        loginUrl: url,
+        homeUrl: url,
+        // Per-site profile dir — full session isolation per website.
+        browserDir: dataDir(`browser-custom-${slug}`),
+        contextOptions: null,
+        defaultActive: false, // gated by the parent 'custom-website' toggle
+        activeEnv: null,
+        linkedWith: 'custom-website',
+        claimDbFile: null,
+        scheduleKind: 'daily-chain',
+        features: [],
+        configFields: [],
+        extraEnv: { CUSTOM_SITE_ID: id }, // per-card Run: visit only this site
+        checkLogin: makeCustomCheckLogin(url),
+      });
+    });
+    return entries;
   } catch {
     return []; // unreadable/absent config ⇒ treat as unconfigured
   }
+}
+
+// Generic sign-in probe (the structural heuristic fab.js / aliexpress.js
+// rely on: a visible sign-in control ⇒ not logged in) — the only generic
+// check that works for *arbitrary* user-configured websites. Each per-site
+// entry pins the probe to its own URL, so every website is verified on its
+// own page in its own profile.
+function makeCustomCheckLogin(url) {
+  return async (page) => {
+    let host = '';
+    try { host = new URL(url).hostname; } catch { host = url; }
+    if (page.url() !== url) {
+      // checkSiteStatus opens a bare page (panel doesn't navigate for us),
+      // and the interactive flow may have opened about:blank — always land
+      // on the site's URL unless already there (re-navigating would drop
+      // in-page state the user just set up via noVNC).
+      try { await page.goto(url, { waitUntil: 'domcontentloaded' }); } catch { /* goto error ⇒ not-logged-in below */ }
+    }
+    const sel = 'a[href*="/login" i], a[href*="/signin" i], a:has-text("Log in"), a:has-text("Sign in"), button:has-text("Log in"), button:has-text("Sign in")';
+    const n = await page.locator(sel).count().catch(() => 0);
+    let visible = 0;
+    for (let i = 0; i < n; i++) {
+      try { if (await page.locator(sel).nth(i).isVisible()) visible++; } catch { /* detached mid-check */ }
+    }
+    if (visible > 0) return { loggedIn: false, user: host };
+    return { loggedIn: true, user: `custom site (${host})` };
+  };
+}
+
+// Live per-website custom-site entries (see readCustomSiteEntries).
+export function getCustomSites() {
+  return readCustomSiteEntries();
+}
+
+// id-keyed map of the login-capable (all) custom entries — the live
+// counterpart of getLoginSitesById() for runtime-added websites.
+export function getCustomLoginSites() {
+  return Object.fromEntries(getCustomSites().map(e => [e.id, e]));
 }
 
 export const SITES = [
@@ -849,15 +922,17 @@ export const SITES = [
     id: 'custom-website',
     name: 'Custom websites',
     version: '0.1',
-    subtitle: 'Visit user-defined URLs in the shared browser profile as part of the daily chain — for sites that award points/coins on a daily logged-in visit (Temu, Lenovo, …). Add URLs below; log in to each site once via the Sessions tab, and the panel flags you if a session goes stale.',
+    subtitle: 'Visit user-defined URLs on every run — for sites that award points/coins on a daily logged-in visit (Temu, Lenovo, …). Each URL you add becomes its own per-site row in the Sessions tab with its own browser profile (isolated cookies), its own Login button, and its own session check — so a captcha or stale login on one site never affects the others. Log in to each site once; the panel flags you if any goes stale.',
     script: platformScript('custom-website'),
     claimOrder: 10.5, // last in the chain — after all claimers and MS; light browser visits
-    // Live file read (never the module-load cfg snapshot — the panel is a
-    // long-lived process and Settings saves land in data/config.json at
-    // runtime): first configured URL, or about:blank so the Sessions Login
-    // button still opens a browser before the user has added any URLs.
-    get loginUrl() { return readCustomWebsiteUrls()[0] || 'about:blank'; },
-    get browserDir() { return cfg.dir.browser; },
+    // Settings/runner carrier — no login flow of its own: the per-website
+    // entries (getCustomSites()) are the operational unit. Null loginUrl +
+    // null checkLogin keeps the parent out of the Sessions/login machinery
+    // while it stays in the claim chain (its script visits all per-site
+    // profiles) and in the Settings UI (Active toggle + URL textarea).
+    loginUrl: null,
+    homeUrl: null,
+    browserDir: null,
     contextOptions: null,
     defaultActive: false,
     activeEnv: 'CW_ACTIVE',
@@ -869,34 +944,9 @@ export const SITES = [
       { key: 'customUrls', env: 'CUSTOM_URLS', type: 'string', default: '',
         label: 'Websites to visit (one per line)',
         multiline: true,
-        hint: 'Any http(s) URL the shared browser should visit on each run — for sites that award points/coins just for a daily logged-in visit. Log in to each site once via the Sessions tab (or noVNC); the shared browser profile holds the session, and the panel notifies you if a session goes stale. Newline- or comma-separated; also settable via the CUSTOM_URLS env var.' },
+        hint: 'One entry per website the browser should visit on each run — for sites that award points/coins just for a daily logged-in visit. Each URL gets its own isolated browser profile + its own Sessions-tab row (log in to it once, via that row\'s Login button); the runner visits them all in your saved sessions on every run, and the post-run session check pings you if any login goes stale. Newline- or comma-separated; also settable via the CUSTOM_URLS env var.' },
     ],
-    checkLogin: async (page) => {
-      // Generic sign-in probe (the structural heuristic fab.js / aliexpress.js
-      // rely on: a visible sign-in control ⇒ not logged in) — the only
-      // generic check that works for *arbitrary* user-configured sites.
-      const urls = readCustomWebsiteUrls();
-      if (!urls.length) return { loggedIn: false, error: 'no custom websites configured (Settings → Services → Custom websites)' };
-      const first = urls[0];
-      // checkSiteStatus opens a bare page (panel does not navigate for us),
-      // and the interactive flow may have opened about:blank when no URLs
-      // were configured at launch — always land on the first configured
-      // URL unless we are already on it (interactive flow: user just
-      // logged in there; re-navigating would drop in-page state).
-      if (page.url() !== first) {
-        try { await page.goto(first, { waitUntil: 'domcontentloaded' }); } catch { /* goto error ⇒ treated as not-logged-in below */ }
-      }
-      const sel = 'a[href*="/login" i], a[href*="/signin" i], a:has-text("Log in"), a:has-text("Sign in"), button:has-text("Log in"), button:has-text("Sign in")';
-      const n = await page.locator(sel).count().catch(() => 0);
-      let visible = 0;
-      for (let i = 0; i < n; i++) {
-        try { if (await page.locator(sel).nth(i).isVisible()) visible++; } catch { /* detached mid-check */ }
-      }
-      let host = '';
-      try { host = new URL(first).hostname; } catch { host = first; }
-      if (visible > 0) return { loggedIn: false, user: host };
-      return { loggedIn: true, user: `custom site (${host})` };
-    },
+    checkLogin: null,
   },
 ];
 

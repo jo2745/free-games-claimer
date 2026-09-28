@@ -206,6 +206,12 @@ export const cfg = {
   // runner splits it. Settings → Services → Custom websites wins over the
   // CUSTOM_URLS env var; env stays as a fallback for compose-only deploys.
   custom_urls: String(cw.customUrls ?? process.env.CUSTOM_URLS ?? ''),
+  // Parent on/off gate (file > env > default false, per describeConfig
+  // merge — the CW_ACTIVE env only wins when the file never set the flag).
+  // The custom-website runner reads this to no-op when the service is off.
+  cw_active: typeof cw.active === 'boolean'
+    ? cw.active
+    : (process.env.CW_ACTIVE === '1'),
   // CAPTCHA opt-in (v2.11.0 / 2D). Zero effect when unset — the solver
   // helpers early-return null and callers keep today's fail-and-diag
   // behaviour. Only when CAPTCHA_API_KEY is set does any provider HTTP

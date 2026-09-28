@@ -1,76 +1,95 @@
-// Visit user-configured URLs in the shared browser profile — the generic
-// "daily login = points" service (Temu, Lenovo, …). URLs are configured
-// in Settings → Services → Custom websites (data/config.json
-// services.custom-website.customUrls, or the CUSTOM_URLS env var: one URL
-// per line, or comma-separated). Log in to those sites once via the panel
-// Sessions tab (or noVNC) — the shared browser profile holds the session,
-// and the panel's post-run session check (registry checkLogin = generic
-// sign-in probe) notifies you if any goes stale.
+// Visit user-configured websites, one isolated browser profile per site.
+//
+// Every URL configured in Settings → Services → Custom websites (or the
+// CUSTOM_URLS env var) becomes its own entry: its own `data/browser-custom-<host>`
+// profile, its own login (Sessions tab), and its own session check. That
+// isolation is the point — a captcha, block, or stale login on ONE site must
+// not poison the shared sessions of the others (each site rides its own
+// cookie jar), and the per-site rows let the panel flag exactly which one
+// needs re-login.
 
 import { launchContext, gotoWithRetry } from '#src/browser.js';
 import { handleSIGINT, log, delay } from '#src/util.js';
 import { cfg } from '#src/config.js';
-import { siteVersion } from '#src/sites.js';
+import { getCustomSites, siteVersion } from '#src/sites.js';
 
 // Settle time after page load so the site's daily check-in beacon has
 // fired before we move on (most fire within a second; allow for slow CDNs).
 const SETTLE_MS = 2000;
 
-handleSIGINT();
+handleSIGINT(); // no per-context handler: contexts open/close sequentially
 log.section(`Custom websites (v${siteVersion('custom-website')})`);
 
-const urls = String(cfg.custom_urls || '')
-  .split(/[\n,]+/)
-  .map(s => s.trim())
-  .filter(Boolean);
+const all = getCustomSites();
+// Per-card "Run" on one Sessions row (extraEnv from the panel): visit only
+// the listed site id(s). Full-chain runs set no filter → all configured
+// sites. Entries whose URL the user since removed from Settings simply
+// aren't visited (they no longer exist in all[]).
+const filter = process.env.CUSTOM_SITE_ID
+  ? new Set(String(process.env.CUSTOM_SITE_ID).split(',').map(s => s.trim()).filter(Boolean))
+  : null;
+const sites = filter ? all.filter(s => filter.has(s.id)) : all;
 
-if (!urls.length) {
+if (!cfg.cw_active) {
+  log.warn('Custom websites service is off (Settings → Services) — skipping.');
+  process.exit(0);
+}
+if (!sites.length) {
   log.warn('No custom websites configured — skipping.');
   log.status('hint', 'Add URLs in Settings → Services → Custom websites (or env CUSTOM_URLS), then re-run.');
   process.exit(0);
 }
 
-log.status('urls', urls.length);
+log.status('sites', `${sites.length} (one isolated profile each)`);
 log.status('mode', cfg.headless ? 'headless' : `headed${cfg.novnc_port ? ` (noVNC on :${cfg.novnc_port})` : ''}`);
 
-const { context, page } = await launchContext('custom-website', { record: false, sigint: true });
 let visited = 0;
 let failed = 0;
-try {
-  for (const url of urls) {
-    let host = url;
+let failedHosts = [];
+for (const site of sites) {
+  const { context, page } = await launchContext(site.id, {
+    profileDir: site.browserDir, // per-site isolation
+    sigint: false, // panel-managed handler above owns SIGINT; one context open at a time
+  });
+  try {
     try {
-      host = new URL(url).hostname;
-    } catch {
-      /* not a plain http(s) URL — use as label */
-    }
-    try {
-      await gotoWithRetry(page, url, {
+      await gotoWithRetry(page, site.url, {
         attempts: 2,
         backoffMs: 2000,
         gotoOpts: { waitUntil: 'domcontentloaded' },
-        siteId: 'custom-website',
-        label: host,
+        siteId: site.id,
+        label: site.name,
       });
       visited++;
-      log.ok(`${host} visited`);
+      log.ok(`${site.name} visited`);
       await delay(SETTLE_MS); // let the page's login beacon fire
     } catch (e) {
+      // Per-site containment: a captcha-walled, blocked, or unreachable
+      // site fails ONLY itself — the remaining sites still run in their
+      // own profiles.
       failed++;
-      log.fail(`${host} — ${String(e.message || e).split('\n')[0]}`);
+      failedHosts.push(site.name);
+      log.fail(`${site.name} — ${String(e.message || e).split('\n')[0]}`);
     }
-  }
-} finally {
-  try {
-    await context.close();
-  } catch {
-    /* context already gone */
+  } finally {
+    try {
+      await context.close();
+    } catch {
+      /* context already gone */
+    }
   }
 }
 
 if (visited === 0) {
-  log.fail(`all ${urls.length} custom website visits failed`);
-  throw new Error(`all ${urls.length} custom website visits failed`);
+  log.fail(`all ${sites.length} custom website visits failed (${failedHosts.join(', ')})`);
+  throw new Error(`all ${sites.length} custom website visits failed`);
 }
 
-log.summary({ claimed: visited, skipped: 0, siteId: 'custom-website', visited, failed, display: 'visited' });
+log.summary({
+  claimed: visited,
+  skipped: 0,
+  siteId: 'custom-website',
+  visited,
+  failed,
+  display: 'visited',
+});
