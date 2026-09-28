@@ -93,6 +93,7 @@ data/                   ← runtime state (mounted volume). NOT in repo.
    ```
 6. **CHANGELOG entry required** for every user-visible change. `## What's new in X.Y.Z` at the top, explains the *why* not just the *what*.
 7. **Version = single-sourced from `package.json`**. Never hardcode elsewhere. Filed in `feedback_single_version_source`.
+8. **Fork releases: always bump `main` after the tag push.** The GHCR workflow only applies `:latest` on default-branch (main) runs; a tag-ref run (tag push or a workflow_dispatch on a tag) writes only the SHA manifest — and 4-part fork versions (`v2.12.5.2`) don't parse as semver, so the tag run writes *no* usable tags at all. Consequence: self-hosters' compose `pull` of `:latest` fails (`manifest unknown`) until a main-branch run fires. So after every fork tag release, push a (docs-only if nothing else) main commit. Symptom triage: pull error `denied` = repo missing (build didn't run — on a fork, check that Actions are enabled in repo Settings: GitHub silently disables fork workflows on fork creation, and pushes made while disabled never trigger runs); `manifest unknown` = repo exists but that tag never got applied (the tag-run trap above). Hit live 2026-09-28 (v2.12.5.2): dispatch ran on the tag ref, `:latest` stayed stale, self-hosters' pull looped on `manifest unknown`.
 
 ## Issue queue workflow
 
