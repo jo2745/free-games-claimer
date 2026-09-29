@@ -222,15 +222,41 @@ export function readIkeaRewardsUrl() {
 // control ⇒ stale) — the structural heuristic fab.js / aliexpress.js /
 // the custom sites use for arbitrary UIs. Pinned to the live rewards
 // URL, so a Settings URL swap is honored on the next check.
+//
+// Cloudflare resilience: the rewards page sits behind a CF managed
+// challenge, and a fingerprint that trips it (e.g. Accept-Language
+// mismatched to the page's language) loops the "Just a moment…" interstitial
+// forever — every retry re-challenging. Detect the interstitial in-page
+// and retry a couple of times with backoff (the JS challenge often
+// self-clears within ~10s in a clean browser); if it's still up, report
+// not-logged-in WITH the reason in `user` rather than a bare guess, so
+// the Alerts tab shows what actually happened instead of a false
+// stale-session ping. (The real fix is the caller aligning the browser
+// locale to the page language — urlLocale() — which keeps CF quiet.)
 function makeIkeaCheckLogin() {
   return async (page) => {
-    const url = readIkaRewardsUrl();
+    const url = readIkeaRewardsUrl();
     let host = '';
     try { host = new URL(url).hostname; } catch { host = url; }
     if (page.url() !== url) {
       try { await page.goto(url, { waitUntil: 'domcontentloaded' }); } catch { /* goto error ⇒ not-logged-in below */ }
     }
     await page.waitForTimeout(1500).catch(() => {}); // React app mounts after first paint
+    // CF interstitial still up? (title + canonical challenge-URL marker)
+    const cfUp = () => page.evaluate(() =>
+      /just a moment/i.test(document.title) || !!document.getElementById('challenge-form'))
+      .catch(() => false);
+    if (await cfUp()) {
+      for (let retry = 0; retry < 2; retry++) {
+        await page.waitForTimeout(20000).catch(() => {}); // CF JS challenge self-clears in ~10s
+        try { await page.goto(url, { waitUntil: 'domcontentloaded' }); } catch {}
+        await page.waitForTimeout(3000).catch(() => {});
+        if (!(await cfUp())) break;
+      }
+      if (await cfUp()) {
+        return { loggedIn: false, user: `Cloudflare challenge up on ${host} — check noVNC, then re-check` };
+      }
+    }
     const sel = 'a[href*="/login" i], a[href*="/signin" i], a:has-text("Log in"), a:has-text("Sign in"), button:has-text("Log in"), button:has-text("Sign in"), a:has-text("Logga in"), button:has-text("Logga in"), a:has-text("Log in"), [data-testid*="login" i]';
     const n = await page.locator(sel).count().catch(() => 0);
     let visible = 0;
@@ -1009,13 +1035,44 @@ export const SITES = [
     activeEnv: 'IKEA_ACTIVE',
     linkedWith: null,
     claimDbFile: null,
-    scheduleKind: 'watch-only',
+    // daily-chain, NOT watch-only: this is a SESSION service (log in once
+    // via the Sessions row, then every run watches the saved session) —
+    // the watch-only bucket is for no-login watchers (GamerPower fetchers,
+    // …), and a login-capable entry in it lands on BOTH the full Sessions
+    // card and the compact watcher card, and in BOTH Settings buckets.
+    scheduleKind: 'daily-chain',
     features: [],
     configFields: [
       { key: 'rewardsUrl', env: 'IKEA_REWARDS_URL', type: 'string',
         default: 'https://www.ikea.com/fi/fi/ikea-family/benefits/rewards/',
         label: 'Rewards page URL',
-        hint: 'The logged-in rewards/points page the watcher visits — each country\'s IKEA path differs (fi/fi, se/sv, de/de, …). Default is Finland; swap it for your country\'s page if you\'re not in FI. Log in to IKEA Family in the Sessions row once; the runner then watches it in your saved session.' },
+        // Presets = every verified ikea.com country with a rewards page
+        // (path probes, 2026-09): pick your country instead of web-searching
+        // the URL. The free-text input below the dropdown still accepts any
+        // custom URL (TLD sites like ikea.lt / ikea.lv, BG/GR, …).
+        presets: [
+          { value: 'https://www.ikea.com/fi/fi/ikea-family/benefits/rewards/', label: 'Finland (fi)' },
+          { value: 'https://www.ikea.com/de/de/ikea-family/benefits/rewards/', label: 'Germany (de)' },
+          { value: 'https://www.ikea.com/se/sv/ikea-family/benefits/rewards/', label: 'Sweden (se)' },
+          { value: 'https://www.ikea.com/no/no/ikea-family/benefits/rewards/', label: 'Norway (no)' },
+          { value: 'https://www.ikea.com/dk/da/ikea-family/benefits/rewards/', label: 'Denmark (dk)' },
+          { value: 'https://www.ikea.com/pl/pl/ikea-family/benefits/rewards/', label: 'Poland (pl)' },
+          { value: 'https://www.ikea.com/es/es/ikea-family/benefits/rewards/', label: 'Spain (es)' },
+          { value: 'https://www.ikea.com/fr/fr/ikea-family/benefits/rewards/', label: 'France (fr)' },
+          { value: 'https://www.ikea.com/it/it/ikea-family/benefits/rewards/', label: 'Italy (it)' },
+          { value: 'https://www.ikea.com/cz/cs/ikea-family/benefits/rewards/', label: 'Czech (cz)' },
+          { value: 'https://www.ikea.com/hu/hu/ikea-family/benefits/rewards/', label: 'Hungary (hu)' },
+          { value: 'https://www.ikea.com/at/de/ikea-family/benefits/rewards/', label: 'Austria (at)' },
+          { value: 'https://www.ikea.com/ch/de/ikea-family/benefits/rewards/', label: 'Switzerland (ch)' },
+          { value: 'https://www.ikea.com/pt/pt/ikea-family/benefits/rewards/', label: 'Portugal (pt)' },
+          { value: 'https://www.ikea.com/ro/ro/ikea-family/benefits/rewards/', label: 'Romania (ro)' },
+          { value: 'https://www.ikea.com/hr/hr/ikea-family/benefits/rewards/', label: 'Croatia (hr)' },
+          { value: 'https://www.ikea.com/rs/sr/ikea-family/benefits/rewards/', label: 'Serbia (rs)' },
+          { value: 'https://www.ikea.com/nl/nl/ikea-family/benefits/rewards/', label: 'Netherlands (nl)' },
+          { value: 'https://www.ikea.com/ie/en/ikea-family/benefits/rewards/', label: 'Ireland (ie)' },
+          { value: 'https://www.ikea.com/gb/en/ikea-family/benefits/rewards/', label: 'United Kingdom (gb)' },
+        ],
+        hint: 'The logged-in rewards/points page the watcher visits — each country\'s IKEA path differs (fi/fi, se/sv, de/de, …). Pick your country from the dropdown, or type any URL below it (TLD sites like ikea.lt / ikea.lv, or a custom rewards page). The browser\'s language is auto-aligned to the page\'s country/language so IKEA serves it in your local language instead of English (and its Cloudflare check doesn\'t loop). Default is Finland. Log in to IKEA Family in the Sessions row once; the runner then watches it in your saved session.' },
     ],
     checkLogin: makeIkeaCheckLogin(),
   },
@@ -1164,6 +1221,10 @@ export function getServiceRows() {
         // Multi-line free text (e.g. the custom-website URL list) renders
         // as a textarea in fieldRow instead of a single-line input.
         if (f.multiline) extra.multiline = true;
+        // Preset quick-picks (e.g. IKEA country list) render above the
+        // free-text input in fieldRow — the input stays free-text so
+        // custom values still work; the select just fills it in.
+        if (f.presets) extra.presets = f.presets;
         if (f.kind === 'hour-of-day') extra.options = HOURS_OF_DAY;
         // Generic options pass-through for enum-style configFields. The
         // service entry supplies `options` as a list of { value, label }

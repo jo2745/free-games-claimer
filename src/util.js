@@ -142,6 +142,47 @@ export const filenamify = s => s.replaceAll(':', '.').replace(/[^a-z0-9 _\-.]/gi
 const EN_PINNED_SITES = new Set(['prime-gaming', 'microsoft', 'microsoft-mobile', 'fab', 'aliexpress']);
 export const siteLocale = siteId => EN_PINNED_SITES.has(siteId) ? 'en-US' : cfg.browser_locale || 'en-US';
 
+// Derive a BCP-47 browser locale from a page URL so the browser's
+// Accept-Language matches the page's language. Path-shaped sites (IKEA:
+// https://www.ikea.com/fi/fi/…) carry country+language in the first two
+// path segments; TLD-shaped sites (ikea.lt, ikea.rs, …) take the region
+// from the TLD and the language from the first path segment.
+// Mismatched Accept-Language makes content-negotiating sites 302 you onto
+// the English page (fi/fi → fi/en) AND trip Cloudflare's bot scoring —
+// the en-US-on-a-Finnish-page loop that left logins stuck on "Just a
+// moment…" forever. Returns null for unmapped shapes; callers fall back
+// to the default locale. Pure function — safe at module scope (util.js
+// is the bootstrap-cycle-safe module; no cfg access needed).
+const TLD_REGION = new Set(['lt', 'lv', 'hr', 'rs', 'bg', 'gr', 'tr', 'ua', 'ru', 'by', 'me', 'ba', 'mk', 'al']);
+// Region → default language when the URL carries no language segment.
+const LOCALE_DEFAULT = { fi: 'fi', de: 'de', se: 'sv', no: 'nb', dk: 'da', pl: 'pl', es: 'es', fr: 'fr', it: 'it', cz: 'cs', hu: 'hu', at: 'de', ch: 'de', pt: 'pt', ro: 'ro', hr: 'hr', rs: 'sr', nl: 'nl', ie: 'en', gb: 'en', be: 'fr', lt: 'lt', lv: 'lv', bg: 'bg', gr: 'el', ua: 'uk', tr: 'tr', is: 'is', mt: 'mt' };
+export const urlLocale = (url) => {
+  try {
+    const u = new URL(String(url || ''));
+    const seg = u.pathname.split('/').filter(Boolean);
+    const tld = u.hostname.split('.').pop();
+    // TLD-shaped (www.ikea.lt/…) FIRST: region comes from the TLD and the
+    // first path segment is the LANGUAGE slot (the cc slot doesn't exist
+    // when the country is in the domain). Must run before the path branch
+    // or a /lv/ path on a .lt domain misreads as region 'LV'.
+    if (TLD_REGION.has(tld)) {
+      const region = tld.toUpperCase();
+      const lang = (seg[0] && /^[a-z]{2,3}$/i.test(seg[0])) ? seg[0].toLowerCase() : (LOCALE_DEFAULT[tld] || null);
+      if (!lang) return null;
+      return lang === 'no' ? `nb-${region}` : `${lang}-${region}`;
+    }
+    // Path-shaped: /cc/(lang)/… — region from segment 1, language from segment 2.
+    if (seg.length && /^[a-z]{2,3}$/i.test(seg[0])) {
+      const cc = seg[0].toLowerCase();
+      const region = cc.toUpperCase();
+      const lang = (seg[1] && /^[a-z]{2,3}$/i.test(seg[1])) ? seg[1].toLowerCase() : (LOCALE_DEFAULT[cc] || null);
+      if (!lang) return null;
+      return lang === 'no' ? `nb-${region}` : `${lang}-${region}`;
+    }
+    return null;
+  } catch { return null; }
+};
+
 // Chromium launch flags matching the context `locale` (pass siteLocale(id)):
 // set --lang/--accept-lang and disable auto-translate so DOM text stays in the
 // served language. The accept-lang chain keeps an English fallback (en;q=0.8).

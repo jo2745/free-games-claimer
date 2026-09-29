@@ -39,6 +39,7 @@
 // as lenovo-gaming's in-frame extraction.
 
 import { launchContext, gotoWithRetry } from '#src/browser.js';
+import { urlLocale } from '#src/util.js';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { datetime, notify, log, dataDir, handleSIGINT } from '#src/util.js';
 import { cfg } from '#src/config.js';
@@ -112,6 +113,11 @@ try {
     profileDir,
     record: false,
     sigint: false, // handleSIGINT() above owns SIGINT
+    // Browser locale aligned to the rewards page's country/language (fi/fi
+    // ⇒ fi-FI) — keeps Accept-Language matching the page, so IKEA serves
+    // the local language instead of 302-ing onto the English path, and
+    // its Cloudflare check doesn't loop on a fingerprint mismatch.
+    locale: urlLocale(URL) || undefined,
   }));
   context.setDefaultTimeout(cfg.debug ? 0 : cfg.timeout);
 
@@ -129,6 +135,29 @@ try {
   // a 6s sleep.
   await page.waitForTimeout(5000).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+  // CF interstitial guard: if the managed challenge is up (title "Just a
+  // moment…" or the canonical /cdn-cgi/challenge URL), the scan would see
+  // an empty shell and false "everything vanished" pings + a balance reset.
+  // Retry with backoff (the JS challenge often self-clears in ~10s); if it
+  // never clears, this run is a NO-SIGNAL run — exit clean WITHOUT touching
+  // the state file, so the saved baseline survives to the next run.
+  const cfUp = () => page.evaluate(() =>
+    /just a moment/i.test(document.title) || /cdn-cgi\/challenge/i.test(location.href))
+    .catch(() => false);
+  if (await cfUp()) {
+    for (let retry = 0; retry < 2; retry++) {
+      log.warn('Cloudflare challenge up on the rewards page — waiting for it to clear…');
+      await page.waitForTimeout(20000).catch(() => {});
+      try { await page.goto(URL, { waitUntil: 'domcontentloaded' }); } catch {}
+      await page.waitForTimeout(5000).catch(() => {});
+      if (!(await cfUp())) { log.info('CF challenge cleared — continuing'); break; }
+    }
+    if (await cfUp()) {
+      log.warn('Cloudflare challenge still up — skipping this run (state file untouched; will retry next run). Solve it once in noVNC if it persists.');
+      await context.close().catch(() => {});
+      process.exit(0);
+    }
+  }
 
   // Scan the main frame AND any child frames (the loyalty widget may be
   // iframed — main-frame-only scans would see an empty shell). The

@@ -4,6 +4,18 @@ Release notes for [Feldorn's Free Games Claimer](README.md). Most recent at the 
 
 ---
 
+## What's new in 2.12.5.4
+
+**Field-test fixes for the IKEA watcher (v2.12.5.3): one card instead of two, the browser speaks the page's language, and the country menu.**
+
+Live testing v2.12.5.3 surfaced four sharp edges, all fixed here:
+
+- **One entity, one card.** Enabling IKEA produced *both* a full Sessions card and a compact Watcher card — the entry was registered as a no-login `watch-only` collector even though it's a *session* service (log in once, then every run watches the saved session). It's now a `daily-chain` service like the rest, so it renders exactly once (the Sessions card) and sits in the same Settings accordion as Microsoft Rewards / AliExpress instead of under “Notify-Only”.
+- **Custom websites are always findable — and extendable in place.** The “Custom websites” row now renders at the bottom of the Sessions grid even while the service is off (pinned to the end of both the active grid and the inactive drawer, so it never gets buried mid-list). The drawer row carries its own URL input + **Add** button: drop in `https://rewards.example.com/daily-bonus`, the new per-site row appears in the grid within seconds, and the row’s hint says to *add a URL and then enable* when no websites are configured yet — no more switching to Settings just to add one more site.
+- **The browser now speaks the page’s language.** IKEA (and any `ikea.com/<cc>/<lang>/`-shaped page) was being visited with `Accept-Language: en-US`, which made the Finnish page 302 onto the English path *and* trip Cloudflare’s bot scoring into an endless “Just a moment…” loop that made manual login impossible. A new `urlLocale()` derives the browser locale from the page URL (`/fi/fi/` ⇒ `fi-FI`, TLD sites like `ikea.lt` from the domain), and the panel’s login flow, session checks, cookie import, *and* the runner all pin the browser to it (context locale **and** the `--lang`/`--accept-lang` flags, so they can’t disagree). URLs without a locale shape are untouched — every other service keeps its existing default.
+- **Cloudflare-tolerant session checks.** The IKEA login probe (and the runner’s scan) detect a live CF challenge, retry with backoff (the JS challenge usually self-clears in ~10s), and if it never clears the run exits as *no-signal* — the state file is left untouched, so the saved balance/activity baseline survives to the next run and a stuck challenge can’t fake “everything vanished” pings.
+- **Country menu with verified URLs.** Settings → IKEA → *Rewards page URL* now offers a dropdown of every verified rewards page (FI, DE, SE, NO, DK, PL, ES, FR, IT, CZ, HU, AT, CH, PT, RO, HR, RS, NL, IE, GB — all 200-verified with live probes), which fills the field below it; the free-text input remains, so TLD pages (`ikea.lt`, `ikea.lv`, …) and any custom rewards URL still work. Picking a different country re-aligns the browser language automatically, so the service is genuinely country-agnostic now.
+
 ## What's new in 2.12.5.3
 
 **New watcher: IKEA Family Rewards — a logged-in points collector that pings you the moment a new activity is posted.**

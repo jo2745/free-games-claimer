@@ -37,18 +37,19 @@ export async function launchContext(siteId, {
   extraArgs = [],
   contextOptions = {},
   sigint = true,
+  locale, // BCP-47 override (e.g. urlLocale(<rewards page URL>)) — wins over siteLocale(); keeps the context locale AND the --lang/--accept-lang flags in agreement (content-negotiating sites 302 onto the English page, and Cloudflare loops, when Accept-Language mismatches the page language)
 } = {}) {
   cleanProfileLocks(profileDir);
-  const locale = siteLocale(siteId);
+  const loc = locale || siteLocale(siteId);
   const context = await chromium.launchPersistentContext(profileDir, {
     headless: cfg.headless,
     viewport: { width: cfg.width, height: cfg.height },
-    locale, // see siteLocale() for the per-site locale policy
+    locale: loc, // see siteLocale() for the per-site locale policy
     timezoneId: cfg.timezone_id,
     recordVideo: record ? { dir: 'data/record/', size: { width: cfg.width, height: cfg.height } } : undefined, // will record a .webm video for each page navigated
     recordHar: record ? { path: `data/record/${recordPrefix}-${filenamify(datetime())}.har` } : undefined, // network requests/responses, importable in Chrome devtools
     handleSIGINT: false, // handled ourselves via handleSIGINT(context) so recordings flush on Ctrl-C
-    args: ['--hide-crash-restore-bubble', ...localeArgs(locale), ...extraArgs],
+    args: ['--hide-crash-restore-bubble', ...localeArgs(loc), ...extraArgs],
     ...contextOptions,
   });
   if (sigint) handleSIGINT(context);

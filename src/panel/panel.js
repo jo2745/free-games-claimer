@@ -3,7 +3,7 @@ import net from 'node:net';
 import { spawn, execFile } from 'node:child_process';
 import { watch, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
-import { datetime, notify, jsonDb, normalizeTitle, cleanProfileLocks, readDigestBuffer, markDigestFlushed, stripGpTail, dataDir, rootDir } from '#src/util.js';
+import { datetime, notify, jsonDb, normalizeTitle, cleanProfileLocks, readDigestBuffer, markDigestFlushed, stripGpTail, dataDir, rootDir, urlLocale } from '#src/util.js';
 import { launchContext } from '#src/browser.js';
 import { cfg } from '#src/config.js';
 import { describeConfig, patchConfig, describeEnv, getSchedulerConfig, CONFIG_FILE_PATH, readConfigFile, writeConfigFile, setByPath as cfgSetByPath, deleteByPath as cfgDeleteByPath } from '#src/app-config.js';
@@ -354,6 +354,10 @@ async function launchSite(siteId) {
     record: false,
     sigint: false, // panel owns the browser lifecycle (activeBrowser / closeBrowser)
     contextOptions: { headless: false, ...(site.contextOptions || {}) },
+    // Browser locale aligned to the page's language (e.g. fi-FI for a /fi/fi/
+    // IKEA page) — keeps the --lang/--accept-lang flags and the context
+    // option in agreement with the page being visited.
+    locale: urlLocale(site.loginUrl) || undefined,
   });
 
   context.setDefaultTimeout(0);
@@ -437,6 +441,7 @@ async function checkSiteStatus(siteId) {
       record: false,
       sigint: false,
       contextOptions: { headless: false, ...(site.contextOptions || {}) },
+      locale: urlLocale(site.loginUrl) || undefined,
       extraArgs: ['--no-sandbox', '--disable-gpu'],
     }));
     const result = await site.checkLogin(page);
@@ -542,6 +547,7 @@ async function importSiteCookies(siteId, rawCookies) {
       record: false,
       sigint: false,
       contextOptions: { headless: false, ...(site.contextOptions || {}) },
+      locale: urlLocale(site.loginUrl) || undefined,
     }));
     await context.addCookies(normalized);
   } finally {
@@ -3198,6 +3204,27 @@ async function getState() {
         siteUrl: e.homeUrl || e.loginUrl || null,
         ...(siteStatus[e.id] || { status: 'unknown', user: null, checkedAt: null }),
       })),
+      // The custom-website PARENT always renders in the Sessions grid even
+      // when the service is off (drawer) — the drawer card is where you add
+      // a website URL in place and enable, so the service is always
+      // findable/extendable without switching to the Settings tab. The
+      // client skips it from the active grid when the service is on (the
+      // per-website rows are the visible unit then; the parent has no
+      // login of its own).
+      {
+        id: 'custom-website',
+        name: 'Custom websites',
+        version: '0.1',
+        active: active.has('custom-website'),
+        scheduleKind: 'daily-chain',
+        lastSuccessfulRun: null,
+        siteUrl: null,
+        status: 'unknown',
+        user: null,
+        checkedAt: null,
+        urls: describeConfig().effective?.services?.['custom-website']?.customUrls || '',
+        urlCount: getCustomSites().length,
+      },
     ],
     // Active watch-only collectors (scheduleKind: 'watch-only'). They are
     // not in `sites` because they have no checkLogin / session state, but
@@ -4311,6 +4338,11 @@ const PANEL_HTML = `<!DOCTYPE html>
   .available-drawer .drawer-head { width: 100%; text-align: left; padding: 10px 14px; background: transparent; border: none; color: #a0b4d4; font-size: 13px; cursor: pointer; font-family: inherit; display: flex; align-items: center; gap: 8px; }
   .available-drawer .drawer-head:hover { color: #e0e0e0; }
   .available-drawer .drawer-head .caret { display: inline-block; width: 12px; }
+  /* In-place URL-add row on the Custom websites drawer card */
+  .available-drawer .drawer-url-add { display: flex; gap: 6px; margin-top: 8px; }
+  .available-drawer .drawer-url-add input { flex: 1; min-width: 0; padding: 5px 7px; font-size: 11px; background: #1a2035; border: 1px solid #2a3b52; border-radius: 5px; color: #c8d0e0; }
+  .available-drawer .drawer-url-add input:focus { outline: none; border-color: #4ecca3; }
+  .available-drawer .drawer-url-add .btn { font-size: 11px; padding: 4px 8px; flex-shrink: 0; }
   .available-drawer .drawer-body { padding: 0 14px 12px; display: grid; grid-template-columns: repeat(1, 1fr); gap: 10px; }
   /* The .drawer-body rule above sets display:grid, which beats the UA default
      [hidden]{display:none} on specificity — without this override, toggling
@@ -4826,6 +4858,46 @@ async function enableService(id) {
     }
   } catch (e) {
     showToast('Failed to enable: ' + (e && e.message || 'unknown'), 'error');
+  }
+}
+
+// Fill the free-text input below it from the preset quick-pick dropdown
+// (e.g. an IKEA country); dispatches a real 'input' event so the field's
+// oninput handler (value + dirty tracking) fires exactly as if typed.
+function presetFill(sel) {
+  const input = sel.parentElement ? sel.parentElement.querySelector('input') : null;
+  if (input && sel.value) {
+    input.value = sel.value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  sel.selectedIndex = 0; // re-arm so the same preset can be picked again
+}
+
+// Add a website to the custom-website service straight from the Sessions
+// drawer (in place — no Settings hop). Appends to the newline-joined
+// customUrls list via the same PUT /api/config path the Settings tab uses.
+async function addCustomSiteUrl(btn) {
+  const input = (btn.closest('.drawer-url-add') || {}).querySelector('input');
+  if (!input) return;
+  let u = (input.value || '').trim();
+  if (!u) { input.select(); return; }
+  if (u.indexOf('http') !== 0) u = 'https://' + u; // bare domain ⇒ assume https
+  try {
+    let existing = '';
+    try {
+      const cfg = await (await fetch(BASE_PATH + '/api/config')).json();
+      const cw = ((cfg.effective || {}).services || {})['custom-website'] || {};
+      existing = cw.customUrls || '';
+    } catch {}
+    const NL = String.fromCharCode(10); // regex-free newline (PANEL_HTML is a template literal)
+    if (existing.length && existing.charAt(existing.length - 1) === NL) existing = existing.slice(0, -1);
+    const next = existing ? existing + NL + u : u;
+    await api('PUT', '/config', { 'services.custom-website.customUrls': next });
+    input.value = '';
+    showToast('Added ' + u + ' — the site row appears in the grid (enable the service to start visiting)', 'success');
+    await refreshState();
+  } catch (e) {
+    showToast('Failed to add: ' + (e && e.message || 'unknown'), 'error');
   }
 }
 
@@ -6543,7 +6615,16 @@ function fieldRow(path, label, extra) {
     inputHtml = '<input type="text" value="' + escapeHtml(asStr) + '" oninput="setSettingValue(\\'' + path + '\\', this.value.split(/[,\\s]+/).map(s => s.trim()).filter(Boolean))">';
   } else {
     const sensAttr = sensitive ? ' data-sensitive-state="' + sensState + '"' : '';
-    inputHtml = '<input type="text"' + sensAttr + ' value="' + escapeHtml(value || '') + '" oninput="setSettingValue(\\'' + path + '\\', this.value)">';
+    // Preset quick-pick (e.g. the IKEA country list): a dropdown above the
+    // free-text input that fills it in — the input stays free-text, so
+    // arbitrary/custom URLs (TLD pages like ikea.lt, …) still work.
+    const presetSel = Array.isArray(extra.presets) && extra.presets.length
+      ? '<div class="field-presets">'
+          + '<select onchange="presetFill(this)"><option value="">Presets…</option>'
+          + extra.presets.map(o => '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>').join('')
+        + '</select></div>'
+      : '';
+    inputHtml = presetSel + '<input type="text"' + sensAttr + ' value="' + escapeHtml(value || '') + '" oninput="setSettingValue(\\'' + path + '\\', this.value)">';
   }
   // Sensitive fields get a Reveal/Hide toggle inside the input column so
   // the button stays grouped with the masked control rather than sliding
@@ -8483,8 +8564,17 @@ function render() {
   // Sort each group alphabetically by name so the visual order is stable
   // and predictable across all card groupings on the Sessions tab.
   const byName = (a, b) => (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' });
-  const activeCards = state.sites.filter(s => s.active !== false).slice().sort(byName);
-  const inactiveCards = state.sites.filter(s => s.active === false).slice().sort(byName);
+  // Custom-website rows always sort to the bottom of the grid (active or
+  // drawer) — that's the service you extend with new URLs, so it sits at
+  // the end where the additions accumulate.
+  const customLast = (a, b) => {
+    const ac = a.id === 'custom-website' || String(a.id || '').startsWith('custom-');
+    const bc = b.id === 'custom-website' || String(b.id || '').startsWith('custom-');
+    if (ac !== bc) return ac ? 1 : -1;
+    return (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' });
+  };
+  const activeCards = state.sites.filter(s => s.active !== false && s.id !== 'custom-website').slice().sort(customLast);
+  const inactiveCards = state.sites.filter(s => s.active === false).slice().sort(customLast);
 
   cards.innerHTML = activeCards.map(s => {
     const dotClass = s.status === 'logged_in' ? 'logged-in' : s.status === 'not_logged_in' ? 'not-logged-in' : s.status === 'error' ? 'error' : 'unknown';
@@ -8630,18 +8720,28 @@ function render() {
     } else {
       drawer.style.display = 'block';
       const expanded = drawerExpanded;
-      const cardsHtml = inactiveCards.map(s =>
-        '<div class="site-card card-inactive">' +
-          '<div class="site-card-header">' +
+      const cardsHtml = inactiveCards.map(s => {
+        const isCw = s.id === 'custom-website';
+        const statusText = isCw
+          ? (s.urlCount > 0
+              ? 'Not active — ' + s.urlCount + ' website' + (s.urlCount === 1 ? '' : 's') + ' configured; enable to start visiting on every run'
+              : 'Add a website URL below, then enable to start using this service')
+          : 'Not active — enable to start using this service.';
+        const urlRow = isCw
+          ? '<div class="drawer-url-add"><input type="text" placeholder="https://rewards.example.com/daily-bonus" aria-label="Website URL to add"><button class="btn" onclick="addCustomSiteUrl(this)">+ Add</button></div>'
+          : '';
+        return '<div class="site-card card-inactive"' + (isCw ? ' data-custom-parent="1"' : '') + '>' +
+          '<div class="site-card-header"' + (isCw ? ' style="margin-bottom:6px"' : '') + '>' +
             '<div class="dot unknown"></div>' +
             '<div class="name">' + s.name + '</div>' +
           '</div>' +
-          '<div class="status">Not active — enable to start using this service.</div>' +
+          '<div class="status">' + statusText + '</div>' +
+          urlRow +
           '<div class="card-actions">' +
             '<button class="btn btn-run" onclick="enableService(\\'' + s.id + '\\')">Enable</button>' +
           '</div>' +
-        '</div>'
-      ).join('');
+        '</div>';
+      }).join('');
       drawer.innerHTML =
         '<button class="drawer-head" onclick="toggleAvailableDrawer()" aria-expanded="' + expanded + '">' +
           '<span class="caret">' + (expanded ? '▾' : '▸') + '</span> ' +
