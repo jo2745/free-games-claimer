@@ -17,7 +17,7 @@
 
 ## Current live state (update at end of each session)
 
-- **Version shipped:** v2.12.5.2 (fork-local; base feldorn v2.12.5) → check `package.json` and latest git tag.
+- **Version shipped:** v2.12.5.3 (fork-local; base feldorn v2.12.5) → check `package.json` and latest git tag.
 - **Container:** `ghcr.io/feldorn/free-games-claimer:latest`, running from `~/docker/docker-compose.yml`. Compose service name = `free-games-claimer`.
 - **Open PRs:** none.
 - **Open issues:** rolling. See `gh issue list --state open` and the 2-week close rule below.
@@ -78,7 +78,7 @@ data/                   ← runtime state (mounted volume). NOT in repo.
 - `discoveries-state.json` — user's ignore/manually-claimed markers
 - `notifications-log.json` — v2.11.0+ notification journal (rolling 500)
 - `pending-steam-keys.json` — Prime → Steam auto-redeem queue
-- `*-watch.json` — per-watcher tracked-items state (indiegala, psn, xbox, fanatical, humble-bundle, lenovo-gaming, ubisoft)
+- `*-watch.json` — per-watcher tracked-items state (indiegala, psn, xbox, fanatical, humble-bundle, lenovo-gaming, ubisoft, ikea-rewards)
 
 ## Release rhythm
 
@@ -115,6 +115,7 @@ gh api graphql -f query='query { repository(owner:"feldorn",name:"free-games-cla
 
 These have all bitten the codebase. Read the memory file before touching the corresponding surface:
 
+- **Dead module-scope regexes that re-type their own in-page copy inside `evaluate()`** (`feedback_evaluate_pattern_duplication_divergence`). The in-page context can't see module scope, so the pattern must be inlined in the in-page string — and the two copies silently drift (v2.12.5.3: the dead module-scope copies disagreed with the live in-page ones on several word forms and a trailing `\b` that misfired on non-ASCII endings). Pass the pattern STRINGS as `evaluate()` args (`new RegExp(arg, 'i')` in-page) — one copy of the truth. Caught while rewriting the IKEA rewards runner.
 - **PANEL_HTML is a giant backtick template literal** (`feedback_panel_html_no_backticks`). Regex escapes (`\d`, `\s`, `\/`) get eaten by template evaluation — double them (`\\d`, `\\s`, `\\/`). Bare backticks in comments or strings terminate PANEL_HTML early — Node crashes at import. Regressed 4 times so far.
 - **`disabled` attribute means different things pre- vs post-click** (`feedback_disabled_state_context`). Pre-click = state signal (already-owned). Post-click = loading spinner. Never use `disabled` as a success signal in a post-click race.
 - **Diagnostic-scanner `script` is a DISPLAY name, not a site id** (`feedback_diag_script_is_display_name`). `_currentSection` is captured from `─── Section (vN) ───` headers → `"Epic Games"`. `lastRunSuccess`, `sites.js`, per-service DBs all use kebab-case ids (`"epic-games"`). `toLowerCase()` does NOT bridge the gap. Use `_resolveSiteIdFromScript()` or the stored `siteId`. Broke Tier-2 auto-dismiss for 68 days (v2.8.78 → v2.12.5).
