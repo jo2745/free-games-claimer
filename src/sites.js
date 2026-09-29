@@ -199,6 +199,49 @@ export function getCustomLoginSites() {
   return Object.fromEntries(getCustomSites().map(e => [e.id, e]));
 }
 
+// IKEA Family points — live read of the rewards-page URL from
+// data/config.json (the Settings 'rewards page URL' field), falling
+// back to the Finland rewards page (the default). Same live-read
+// discipline as the custom-website entries: a URL swapped via Settings
+// after boot must be used by the login flow + session probe without a
+// restart.
+const IKEA_DEFAULT_URL = 'https://www.ikea.com/fi/fi/ikea-family/benefits/rewards/';
+export function readIkeaRewardsUrl() {
+  try {
+    const file = dataDir('config.json');
+    if (existsSync(file)) {
+      const config = JSON.parse(readFileSync(file, 'utf8')) || {};
+      const v = config.services?.['ikea-rewards']?.rewardsUrl;
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+  } catch { /* unreadable ⇒ default */ }
+  return process.env.IKEA_REWARDS_URL?.trim() || IKEA_DEFAULT_URL;
+}
+
+// Generic sign-in probe for the IKEA rewards page (visible sign-in
+// control ⇒ stale) — the structural heuristic fab.js / aliexpress.js /
+// the custom sites use for arbitrary UIs. Pinned to the live rewards
+// URL, so a Settings URL swap is honored on the next check.
+function makeIkeaCheckLogin() {
+  return async (page) => {
+    const url = readIkaRewardsUrl();
+    let host = '';
+    try { host = new URL(url).hostname; } catch { host = url; }
+    if (page.url() !== url) {
+      try { await page.goto(url, { waitUntil: 'domcontentloaded' }); } catch { /* goto error ⇒ not-logged-in below */ }
+    }
+    await page.waitForTimeout(1500).catch(() => {}); // React app mounts after first paint
+    const sel = 'a[href*="/login" i], a[href*="/signin" i], a:has-text("Log in"), a:has-text("Sign in"), button:has-text("Log in"), button:has-text("Sign in"), a:has-text("Logga in"), button:has-text("Logga in"), a:has-text("Log in"), [data-testid*="login" i]';
+    const n = await page.locator(sel).count().catch(() => 0);
+    let visible = 0;
+    for (let i = 0; i < n; i++) {
+      try { if (await page.locator(sel).nth(i).isVisible()) visible++; } catch { /* detached mid-check */ }
+    }
+    if (visible > 0) return { loggedIn: false, user: host };
+    return { loggedIn: true, user: `IKEA Family (${host})` };
+  };
+}
+
 export const SITES = [
   {
     id: 'prime-gaming',
@@ -947,6 +990,34 @@ export const SITES = [
         hint: 'One entry per website the browser should visit on each run — for sites that award points/coins just for a daily logged-in visit. Each URL gets its own isolated browser profile + its own Sessions-tab row (log in to it once, via that row\'s Login button); the runner visits them all in your saved sessions on every run, and the post-run session check pings you if any login goes stale. Newline- or comma-separated; also settable via the CUSTOM_URLS env var.' },
     ],
     checkLogin: null,
+  },
+  {
+    id: 'ikea-rewards',
+    name: 'IKEA Family Rewards',
+    version: '0.1',
+    subtitle: 'Points collector for IKEA Family (logged-in rewards page). The runner visits the rewards page in its own browser profile on every run and watches for posted point activities (quizzes, check-ins, card games) plus your points balance — it pings you (Pushover + Alerts tab) when a new activity is posted or your balance changes, with a deep link into noVNC where you complete the activity by hand. Notify-then-act by design: IKEA\'s client-rendered activity UIs are fragile to script, and auto-clicking your way through their anti-bot is how you get your Family account flagged. Log in once via the Sessions row; the session is isolated in data/browser-ikea-rewards so it can\'t be poisoned by (or poison) the store logins.',
+    script: platformScript('ikea-rewards'),
+    claimOrder: 10.6, // last in the chain — light visits after everything else
+    // Live file read (Settings → Rewards page URL, per-country paths
+    // differ: fi/fi, se/sv, de/de, …) — swap the country via Settings
+    // without a restart; IKEA_REWARDS_URL env as the compose-only knob.
+    get loginUrl() { return readIkeaRewardsUrl(); },
+    homeUrl: null,
+    get browserDir() { return dataDir('browser-ikea-rewards'); },
+    contextOptions: null,
+    defaultActive: false,
+    activeEnv: 'IKEA_ACTIVE',
+    linkedWith: null,
+    claimDbFile: null,
+    scheduleKind: 'watch-only',
+    features: [],
+    configFields: [
+      { key: 'rewardsUrl', env: 'IKEA_REWARDS_URL', type: 'string',
+        default: 'https://www.ikea.com/fi/fi/ikea-family/benefits/rewards/',
+        label: 'Rewards page URL',
+        hint: 'The logged-in rewards/points page the watcher visits — each country\'s IKEA path differs (fi/fi, se/sv, de/de, …). Default is Finland; swap it for your country\'s page if you\'re not in FI. Log in to IKEA Family in the Sessions row once; the runner then watches it in your saved session.' },
+    ],
+    checkLogin: makeIkeaCheckLogin(),
   },
 ];
 

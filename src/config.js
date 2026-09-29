@@ -205,6 +205,12 @@ export const cfg = {
   // daily logged-in visit. Raw string (newline- or comma-separated); the
   // runner splits it. Settings → Services → Custom websites wins over the
   // CUSTOM_URLS env var; env stays as a fallback for compose-only deploys.
+  // IKEA Family rewards watcher: rewards-page URL (per-country paths
+  // differ — file > env > FI default) + parent on/off gate.
+  ikea_rewards_url: String((svc['ikea-rewards'] || {}).rewardsUrl ?? process.env.IKEA_REWARDS_URL ?? 'https://www.ikea.com/fi/fi/ikea-family/benefits/rewards/').replace(/\/+$/, '') || 'https://www.ikea.com/fi/fi/ikea-family/benefits/rewards/',
+  ikea_active: typeof (svc['ikea-rewards'] || {}).active === 'boolean'
+    ? svc['ikea-rewards'].active
+    : (process.env.IKEA_ACTIVE === '1'),
   custom_urls: String(cw.customUrls ?? process.env.CUSTOM_URLS ?? ''),
   // Parent on/off gate (file > env > default false, per describeConfig
   // merge — the CW_ACTIVE env only wins when the file never set the flag).

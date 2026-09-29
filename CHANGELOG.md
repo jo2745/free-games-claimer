@@ -4,6 +4,19 @@ Release notes for [Feldorn's Free Games Claimer](README.md). Most recent at the 
 
 ---
 
+## What's new in 2.12.5.3
+
+**New watcher: IKEA Family Rewards — a logged-in points collector that pings you the moment a new activity is posted.**
+
+IKEA's Family program runs the opposite way from every other service here: games come to you, but *points* come from showing up. They're earned through quizzes, check-ins, and seasonal card games, and posted on the member-only rewards page on a rolling basis — if you're not looking at that page when a new one lands, the activity can close (or the balance window can) before you ever see it. This watcher closes that gap: on every run it visits the rewards page in its **own isolated browser profile** (log in once via the Sessions row — 2FA by hand in noVNC if your country requires it) and scans the client-rendered page (main frame + iframes) for posted earn-activities and your points balance, then **notifies (Pushover + Alerts tab) when a new activity appears or your balance moves** — with a deep link into the noVNC login flow, because completing the activity is *your* click: IKEA's activity/anti-bot UI is exactly the kind of flow where auto-clicking is how a Family account gets flagged, so it's notify-then-act like the other fragile-UI watchers.
+
+- **Multilingual activity vocabulary** — the in-page scan matches earn-CTA wording across FI/SE/Nordic/EN (quizzes, check-ins, lotteries, campaigns, …) and deliberately excludes the *redemption* vocabulary — redeeming *spends* the points you're collecting, so those tiles are never flagged. The patterns are a single source of truth passed into the in-page scan as arguments, so the two copies can't drift apart.
+- **First run = baseline only** (no notifications); every run after that notifies on the diff: a newly posted activity, or balance movement (points landed after you finished an activity). A corrupted state file re-baselines instead of faking a dozen "new" activities.
+- **Country-agnostic** — each country's rewards page lives at a different path, so the page URL is a service setting (Settings → Services → IKEA Family Rewards → *Rewards page URL*, or the `IKEA_REWARDS_URL` env var in compose-only deploys). Default is Finland's page, the program this watcher was built for.
+- Opt-in (`IKEA_ACTIVE=1` or the Settings toggle) and it runs last in the chain, after every other service — light visits, and IKEA's anti-bot never shares a cookie jar with your store logins.
+
+---
+
 ## What's new in 2.12.5.2
 
 **Custom websites: one isolated browser profile per website — a captcha on one site can't poison the others.**
