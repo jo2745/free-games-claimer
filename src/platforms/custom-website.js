@@ -14,8 +14,10 @@ import { cfg } from '#src/config.js';
 import { getCustomSites, siteVersion } from '#src/sites.js';
 
 // Settle time after page load so the site's daily check-in beacon has
-// fired before we move on (most fire within a second; allow for slow CDNs).
-const SETTLE_MS = 2000;
+// fired before we move on. 10s (fork-local; upstream ships 2s) — some
+// beacons (digitalcore.club) only post their token after a longer client
+// init window, and the extra dwell costs nothing (one page, one wait).
+const SETTLE_MS = 10_000;
 
 handleSIGINT(); // no per-context handler: contexts open/close sequentially
 log.section(`Custom websites (v${siteVersion('custom-website')})`);
@@ -62,6 +64,11 @@ for (const site of sites) {
       });
       visited++;
       log.ok(`${site.name} visited`);
+      // Per-site run marker (fork-local): the panel records one
+      // lastRunSuccess entry per configured site, so the Sessions grid
+      // shows each custom site's own last-success instead of the parent
+      // 'custom-website' id the Sessions cards are keyed by.
+      console.log(`  [run] service=${site.id} ok visited=1`);
       await delay(SETTLE_MS); // let the page's login beacon fire
     } catch (e) {
       // Per-site containment: a captcha-walled, blocked, or unreachable

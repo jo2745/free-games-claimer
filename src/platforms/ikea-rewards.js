@@ -80,6 +80,13 @@ const REDEEM_PAT = String.raw`\b(valitse|valitsen|valitset|choose|select|redeem|
 // "12 pistepeli" tile can't out-rank the real balance.
 const BALANCE_PAT = String.raw`(\d[\d\s\u00a0]{0,9})\s*(?:piste|pisteen|pistettä|pisteitä|points|punte|poäng|punct)`;
 
+// Stale-session detection: a visible sign-in control (or login redirect)
+// on the rewards page means the IKEA Family session is gone. Vocabulary
+// spans the Nordic markets + the top EU languages; the in-page scan
+// rebuilds the RegExp from this string (single copy of the truth, same
+// discipline as ACTIVITY_PAT).
+const LOGIN_PAT = String.raw`\b(log in|logga in|sign in|inlogg[a-z]*|anmelden|anmeldung|se connecter|connexion|login|inloggen|inlog|iniciar sesión|accedi|log in|logg in)\b`;
+
 function loadState() {
   // { state, hadBaseline }: hadBaseline is true only when the file
   // existed AND parsed into a usable object. A missing or corrupt file
@@ -159,6 +166,27 @@ try {
     }
   }
 
+  // Stale-session guard: a logged-out rewards page shows a sign-in CTA
+  // (or redirects to the login route). Such a run is NO-SIGNAL — exit
+  // clean WITHOUT touching the state file, exactly like the CF guard
+  // above: a logged-out shell has zero activities and no balance, and
+  // saving it would wipe the member's stored baseline, turning the next
+  // logged-in run's balance into a phantom "balance moved" ping (and
+  // the logged-out shell's marketing tiles into phantom "new activities").
+  const loginUp = () => page.evaluate(({ loginRe }) => {
+    if (/(^|\/)login/i.test(location.href)) return true;
+    const RE = new RegExp(loginRe, 'i');
+    for (const el of document.querySelectorAll('button, a, [role="button"], [role="link"]')) {
+      const text = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).trim();
+      if (text && text.length <= 40 && RE.test(text)) return true;
+    }
+    return false;
+  }, { loginRe: LOGIN_PAT }).catch(() => false);
+  if (await loginUp()) {
+    log.fail('Rewards page shows a sign-in control (stale IKEA session) — skipping this run (state file untouched; re-login via noVNC)');
+    await context.close().catch(() => {});
+    process.exit(0);
+  }
   // Scan the main frame AND any child frames (the loyalty widget may be
   // iframed — main-frame-only scans would see an empty shell). The
   // pattern strings are passed in as evaluate() arguments — the in-page

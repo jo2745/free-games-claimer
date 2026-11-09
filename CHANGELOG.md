@@ -1,6 +1,42 @@
 # Changelog
 
-Release notes for [Feldorn's Free Games Claimer](README.md). Most recent at the top.
+Release notes for the [free-games-claimer jo2745 fork](README.md). Most recent at the top.
+
+---
+
+## What's new in 2.12.34
+
+Fork-local fixes on top of the v2.12.6–v2.12.33 mainline sync (epic CTA rework,
+captcha grace, session-aware panel, etc. — see the mainline sections below).
+
+- **Microsoft Rewards stale-session fix** — the public `rewards.bing.com` root
+  loads fine even when the WAM session is stale, but the msal-protected
+  `/dashboard` still bounces to the `login.live.com/oauth20_authorize.srf`
+  PKCE consent page — the old code then spent the whole earning walk retrying
+  counter selectors on a consent page and ended at 0 points with no diagnosis.
+  `microsoft.js` now probes `/dashboard` after the login check, re-authenticates
+  by clicking the consent **Allow** button (the WAM is valid, so no
+  password/2FA needed), and `readPointsBalance` fast-bails (returns no balance)
+  when the page URL is a login/consent domain instead of retrying selectors.
+  Both the desktop and mobile sessions re-probe their own browser profile.
+- **Custom websites: per-site run state** — the panel's Sessions cards are keyed
+  per configured URL (`custom-digitalcore`), but the runner only emitted one
+  marker under the parent `custom-website` id, so every custom site's card sat
+  at "Successful Run: never". The runner now emits a `[run]` marker per visited
+  site, and the panel records `lastRunSuccess` for each one (the run footer's
+  service count is guarded so per-site markers don't inflate it).
+- **Custom websites: 2s → 10s dwell** — some sites (digitalcore.club) only post
+  their check-in beacon after a longer client-init window; the 2s settle missed
+  it, so the panel showed the run as successful while the site logged nothing.
+  The runner now lingers 10s after load (one page, one wait — no cost elsewhere).
+- **IKEA rewards: stale-session guard** — a logged-out rewards page used to be
+  scanned as a normal run, silently wiping the stored points baseline and
+  turning the next logged-in run into a phantom "new activity / balance moved"
+  ping storm. The runner now detects the sign-in CTA (or a login redirect)
+  and exits clean *without touching the state file* — the next run re-baselines
+  quietly, same pattern as the Cloudflare guard.
+- **README** — project credit now names feldorn's fork (which derives from
+  vogler's original); the Docker example pulls `ghcr.io/jo2745/free-games-claimer`.
 
 ---
 

@@ -404,6 +404,35 @@ async function createContext(isMobile) {
   return { context, page };
 }
 
+// Stale-session signature: the WAM (Windows Auth Module) cookie is alive
+// enough that the public rewards.bing.com page loads, but the msal-protected
+// /dashboard still bounces to the OAuth consent/login page (PKCE re-
+// authorization) — or, on full logout, to the login form. The public-root
+// check in isLoggedIn() can't see this; the probe below can.
+function isAuthBounceUrl(url) {
+  const u = String(url || '').toLowerCase();
+  return u.includes('login.live.com')
+    || u.includes('login.microsoftonline.com')
+    || u.includes('account.microsoft.com')
+    || u.includes('oauth20_authorize')
+    || u.includes('/consent');
+}
+
+// Navigate to /dashboard (the msal-protected app route) and report whether
+// the session is stale (the app bounced us to a consent/login page). The
+// 3s settle lets msal.js's client-side redirect fire before we read the
+// URL — reading it instantly would see the pre-redirect /dashboard URL.
+async function probeDashboardAuth(page) {
+  try {
+    await page.goto(BING_REWARDS_URL + '/dashboard', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await delay(3000);
+    return isAuthBounceUrl(page.url());
+  } catch (e) {
+    log.warn(`dashboard auth probe failed: ${String(e.message || e).split('\n')[0]}`);
+    return false;
+  }
+}
+
 async function isLoggedIn(page) {
   try {
     // Retry here so a transient blip doesn't read as "logged out" and kick off
@@ -416,6 +445,16 @@ async function isLoggedIn(page) {
       && !url.includes('login.microsoftonline.com')
       && !url.includes('account.microsoft.com')
       && !url.includes('/welcome');
+    if (loggedIn && (await probeDashboardAuth(page))) {
+      // Public root loads fine, but the msal-protected /dashboard still
+      // bounces to consent/login — the stale-WAM signature. Count that as
+      // logged out so the session flow re-authenticates BEFORE the earning
+      // walk (otherwise the walk retries counter selectors on a consent
+      // page all day and the run ends at 0 points with no diagnosis).
+      log.warn('isLoggedIn: /dashboard bounced to sign-in despite public root (stale WAM) — re-auth required');
+      log.status('Logged in', 'no (stale dashboard session)');
+      return false;
+    }
     log.status('Logged in', loggedIn ? 'yes' : 'no');
     return loggedIn;
   } catch (e) {
@@ -452,6 +491,25 @@ async function login(page) {
   await page.waitForTimeout(3000); // allow JS-based redirects to complete
   const loginStartUrl = page.url();
   log.status('Login start URL', loginStartUrl);
+  if (loginStartUrl.includes('oauth20_authorize') ||
+      (loginStartUrl.includes('login.live.com') && /consent|authorize/i.test(loginStartUrl))) {
+    // Stale WAM: the app demands an OAuth re-consent (PKCE "Allow" screen)
+    // instead of the login form. The WAM is valid, so clicking Allow
+    // completes the flow with no password/2FA — the fast re-auth path.
+    log.info('On OAuth consent (re-authorization) page — clicking Allow');
+    const allowEl = page.getByRole('button', { name: /allow|salli|permitir|zulassen|autoris/i }).first();
+    if (await allowEl.isVisible().catch(() => false)) {
+      await allowEl.click();
+      await page.waitForURL(/rewards\.bing\.com/, { timeout: 30000 })
+        .catch(e => log.warn(`Consent redirect wait: ${String(e.message || e).split('\n')[0]}`));
+      log.status('URL after consent Allow', page.url());
+      if (String(page.url()).includes('rewards.bing.com')) {
+        if (!cfg.debug) page.context().setDefaultTimeout(cfg.timeout);
+        return; // re-consent complete — skip email/password/2FA entirely
+      }
+    }
+    log.warn('Consent Allow click unavailable or did not land back on Rewards — falling back to standard login path');
+  }
   if (loginStartUrl.includes('/welcome')) {
     log.info('On welcome page — clicking Sign In');
     await page.waitForTimeout(2000); // allow JS to render
@@ -623,14 +681,22 @@ async function readPointsBalance(page) {
       // authenticated dashboard. Force-navigate to /dashboard explicitly
       // and re-wait if we detect the /about landing. Portable — old UI
       // stays at rewards.bing.com/, new UI lives at /dashboard.
-      if (/\/about(\/|$|\?)/i.test(page.url())) {
-        log.info('readPointsBalance: landed on /about — navigating to /dashboard explicitly');
+      if (/\/(about|dashboard)(\/|$|\?)/i.test(page.url())) {
+        log.info('readPointsBalance: landed on public/consent route — navigating to /dashboard explicitly');
         try {
           await page.goto(BING_REWARDS_URL + '/dashboard', { waitUntil: 'domcontentloaded', timeout: 60000 });
           await delay(3000);
         } catch (e) {
           log.info(`readPointsBalance: /dashboard navigation ${String(e.message || e).split('\n')[0]}`);
         }
+      }
+      // Stale session: the WAM cookie loads the public page, but the
+      // msal-protected dashboard bounces to the OAuth consent/login URL.
+      // Fast-bail instead of retrying counter selectors — the counter
+      // never exists on a consent page, and the session flow re-auths.
+      if (isAuthBounceUrl(page.url())) {
+        log.warn(`readPointsBalance: ${page.url().split('?')[0]} (stale session) — no balance read this run`);
+        return null;
       }
       // RSC primary path (v2.8.40, from kevindevm's #71 finding): MS's
       // dashboard is a React Server Components route, and re-fetching
@@ -1345,6 +1411,18 @@ log.section('Desktop');
     }
     if (loggedIn) {
       log.status('Signed in', 'yes');
+      // Stale WAM (fork-local): the public root loads, but /dashboard
+      // still bounces to the OAuth consent page. Re-auth (consent Allow /
+      // full login) and re-probe BEFORE the earning walk; if the session
+      // still bounces, throw so the session catch marks the failure —
+      // the walk would just burn 12 searches on a consent page at 0.
+      if (await probeDashboardAuth(page)) {
+        log.warn('Dashboard session stale (bounced to sign-in) — re-authenticating before the earning walk');
+        await login(page);
+        if (await probeDashboardAuth(page)) {
+          throw new Error('stale dashboard session (OAuth consent) persisted after re-login — skipped earning walk; re-login via noVNC');
+        }
+      }
       before = await readPointsBalance(page);
       if (before != null) log.status('Points before', before);
       // Capture new-UI state for the mobile session that follows.
@@ -1446,6 +1524,16 @@ log.section('Mobile');
     }
     if (loggedIn) {
       log.status('Signed in', 'yes');
+      // Stale WAM (fork-local) — mirror of the desktop guard; the mobile
+      // context is a separate browser profile, so its session must be
+      // probed independently.
+      if (await probeDashboardAuth(page)) {
+        log.warn('Dashboard session stale (bounced to sign-in) — re-authenticating before the earning walk');
+        await login(page);
+        if (await probeDashboardAuth(page)) {
+          log.fail('stale dashboard session (OAuth consent) persisted after re-login — re-login via noVNC; skipping mobile earning walk');
+        }
+      }
       before = await readPointsBalance(page);
       if (before != null) log.status('Points before', before);
       // Belt-and-suspenders mobile-side check for setups where desktop

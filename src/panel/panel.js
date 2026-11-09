@@ -1967,7 +1967,13 @@ function runAllScripts({ source = 'panel', sites = null, extraEnv = null } = {})
       for (const m of text.matchAll(/\[run\] service=(\S+) ok((?:\s+\w+=\d+)*)/g)) {
         recordLastRunSuccess(m[1]);
         if (m[1] === 'microsoft' || m[1] === 'microsoft-mobile') msReportedOk = true;
-        runAgg.services++;
+        // Fork-local: the custom-website runner emits one marker per
+        // configured site (service=custom-<slug>) so the Sessions grid
+        // records each site's own last-success. Those per-site markers are
+        // the SAME one service — counting them would inflate the run
+        // footer's service count, so only the parent marker counts.
+        const isCustomChild = m[1].startsWith('custom-') && m[1] !== 'custom-website';
+        if (!isCustomChild) runAgg.services++;
         for (const f of m[2].matchAll(/(\w+)=(\d+)/g)) {
           if (runAgg[f[1]] != null) runAgg[f[1]] += Number(f[2]);
         }

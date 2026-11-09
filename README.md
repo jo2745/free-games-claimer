@@ -1,14 +1,14 @@
-# Feldorn's Free Games Claimer
+# Free Games Claimer (jo2745 fork of feldorn)
 
 <p align="center">
-<img alt="Feldorn's Free Games Claimer" src="assets/logo.png" width="280" />
+<img alt="Free Games Claimer (jo2745 fork of feldorn)" src="assets/logo.png" width="280" />
 </p>
 
 A self-hosted scheduler that claims free games and rewards across multiple storefronts on its own. Logs in once via your browser session, then keeps watch — daily checks, captcha-aware pause-and-notify when a human is needed, in-app stats showing what got claimed, what's pending, and how your Microsoft Rewards points are trending.
 
 Discovery isn't limited to each store's own free-game feed — the panel cross-references community aggregators ([gamerpower.com](https://www.gamerpower.com/) and [r/FreeGameFindings](https://www.reddit.com/r/FreeGameFindings/)) and picks up launch-day indie promos and storefront-side mystery drops that the first-party feeds miss.
 
-Originally derived from [vogler/free-games-claimer](https://github.com/vogler/free-games-claimer) (dev branch). The control panel, in-app settings UI, claim-history stats, scheduler with hot-reload, AliExpress reintegration, captcha pause + manual-solve handoff, the Steam discovery migration, the Microsoft Rewards collector, the FAB asset claimer, and the Ubisoft / Humble / Fanatical / Lenovo / IndieGala / PSN Plus / Xbox watchers are all additions in this fork. Per-release changes are tracked in [CHANGELOG.md](CHANGELOG.md); [MODIFICATIONS.md](MODIFICATIONS.md) holds a frozen v2.4 snapshot of the diff vs. upstream for historical context.
+Fork of [feldorn/free-games-claimer](https://github.com/feldorn/free-games-claimer) (dev branch), which derives from [vogler/free-games-claimer](https://github.com/vogler/free-games-claimer). The control panel, in-app settings UI, claim-history stats, scheduler with hot-reload, AliExpress reintegration, captcha pause + manual-solve handoff, the Steam discovery migration, the Microsoft Rewards collector, the FAB asset claimer, and the Ubisoft / Humble / Fanatical / Lenovo / IndieGala / PSN Plus / Xbox watchers are all additions in this fork. Per-release changes are tracked in [CHANGELOG.md](CHANGELOG.md); [MODIFICATIONS.md](MODIFICATIONS.md) holds a frozen v2.4 snapshot of the diff vs. upstream for historical context.
 
 Services are grouped by what they actually do.
 
@@ -108,7 +108,7 @@ Uses [patchright](https://github.com/nicbarker/patchright) (Chromium with built-
 ## Quick Start (Docker)
 
 ```sh
-docker run --rm -it -p 6080:6080 -p 7080:7080 -v fgc:/fgc/data --pull=always ghcr.io/feldorn/free-games-claimer
+docker run --rm -it -p 6080:6080 -p 7080:7080 -v fgc:/fgc/data --pull=always ghcr.io/jo2745/free-games-claimer
 ```
 
 Open the control panel at **http://localhost:7080**. On first run, click **Login** for each site to log in via the embedded noVNC browser, then either click **Run Now** or set `LOOP` (and optionally `START_TIME`) so the built-in scheduler fires daily on its own. Sessions persist across container restarts in the `fgc` volume.
@@ -137,4 +137,4 @@ Per-release changes are in **[CHANGELOG.md](CHANGELOG.md)** — what landed in e
 
 ## Credits
 
-Based on [vogler/free-games-claimer](https://github.com/vogler/free-games-claimer) by [@vogler](https://github.com/vogler). See the upstream repository for the original project history and contributors.
+Based on [feldorn/free-games-claimer](https://github.com/feldorn/free-games-claimer) by [@feldorn](https://github.com/feldorn), which derives from [@vogler's](https://github.com/vogler) original. See feldorn's repository for the fork's project history and contributions.

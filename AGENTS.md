@@ -37,6 +37,12 @@ active mainline; it is the only source of new fixes and features.
   rows + logins.
 - **IKEA Family rewards watcher** — `src/platforms/ikea-rewards.js` + `urlLocale()` in `src/util.js`
   (browser language pinned to the page's locale).
+  **Setup (user-side, in the panel):** ① Settings → Services → IKEA Family Rewards → active = on
+  (or `IKEA_ACTIVE=1`); ② pick a country preset (20 verified URLs) or a custom rewards URL in the
+  same accordion; ③ one-time login: press **Login** on the IKEA row in Sessions (noVNC, 2FA by
+  hand). The session then rides `data/browser-ikea-rewards` across runs/restarts; a stale session is
+  detected in-run (sign-in CTA guard) and post-run (registry `checkLogin`) — re-login via noVNC.
+  The runner no-ops (clean exit, state file untouched) until the URL is set / session is live.
 - The four-part CHANGELOG sections (2.12.5.1 – 2.12.5.4) document them; the pre-merge fork line is
   the old `origin/main` tip (491bd4a) — recoverable any time via `git fetch origin`.
 
@@ -63,3 +69,9 @@ active mainline; it is the only source of new fixes and features.
   closed`) — match the literal, not alternations.
 - **No hot-patching** — the flow is edit → commit → `git push origin main` → GHCR build (~10–12 min)
   → user pulls `:latest`. `docker cp` on the live container wouldn't reload the panel anyway.
+- **Stale MS WAM session** — the public `rewards.bing.com` root loads, but the msal-protected
+  `/dashboard` bounces to `login.live.com/oauth20_authorize.srf` (PKCE consent). `microsoft.js`
+  probes `/dashboard` (`probeDashboardAuth`), re-auths via the consent **Allow** click, and
+  fast-bails `readPointsBalance` on a login-domain URL. Don't "simplify" the probe away — the
+  public-root `isLoggedIn` check can't see this failure mode (it's how MS Rewards went to 0
+  points with a valid-looking session).
