@@ -34,7 +34,12 @@ active mainline; it is the only source of new fixes and features.
 
 - **Custom websites** — `src/platforms/custom-website.js` + `src/sites.js` registry entry: visit
   user-defined URLs on every run, each URL on its own isolated browser profile, per-site Sessions
-  rows + logins.
+  rows + logins. The runner also **scrubs the page's displayed points after the 10s settle** (the balance only reflects the new check-in once the site's beacon has fired — scrape pre-settle and you read yesterday's total)
+  (`SITE_BALANCE_SELECTORS` map in the runner — per-host CSS path, currently digitalcore.club's
+  `#statusBox` tile) and persists it to `data/custom-balances.json`; the panel reads that file on
+  every state poll and shows `Balance N` on the per-site Sessions cards (read it there, not from
+  the run marker, so the value survives panel restarts).
+
 - **IKEA Family rewards watcher** — `src/platforms/ikea-rewards.js` + `urlLocale()` in `src/util.js`
   (browser language pinned to the page's locale).
   **Setup (user-side, in the panel):** ① Settings → Services → IKEA Family Rewards → active = on

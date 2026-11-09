@@ -4,6 +4,25 @@ Release notes for the [free-games-claimer jo2745 fork](README.md). Most recent a
 
 ---
 
+## What's new in 2.12.35
+
+Fork-local, on top of v2.12.34 (mainline sync + MS stale-session fix).
+
+- **Custom websites: balance scrubbing** — digitalcore.club (and any
+  future custom site) can display the account's current points on the
+  page; the runner now scrubs that number *during* the visit and
+  persists it to `data/custom-balances.json`. The panel's Sessions
+  cards show `Balance N` per site, so the run log and the panel agree
+  on what the site actually credited — a visit that loads but earns
+  nothing now shows a stale/unchanged balance instead of a silent
+  success. Per-host CSS selectors live in
+  `SITE_BALANCE_SELECTORS` in `custom-website.js` (ID-anchored paths,
+  passed into the in-page scan as arguments) — add a line there to
+  enable it for another site. The number is read *after* the 10s settle,
+  so it reflects the post-check-in total, not yesterday's.
+
+---
+
 ## What's new in 2.12.34
 
 Fork-local fixes on top of the v2.12.6–v2.12.33 mainline sync (epic CTA rework,

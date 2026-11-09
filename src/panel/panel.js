@@ -2255,6 +2255,18 @@ function saveLastRuns() {
     console.error(`[${datetime()}] last-runs: failed to persist: ${e.message}`);
   }
 }
+// Fork-local: per-site scraped balances written by custom-website.js
+// (data/custom-balances.json, { [siteId]: { url, balance, at } }). Read
+// fresh on every state build so the Sessions cards pick up the latest
+// balance scraped on the most recent run — no panel restart needed.
+const CUSTOM_BALANCES_FILE = dataDir('custom-balances.json');
+function readCustomBalances() {
+  try {
+    if (!existsSync(CUSTOM_BALANCES_FILE)) return {};
+    const parsed = JSON.parse(readFileSync(CUSTOM_BALANCES_FILE, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch { return {}; }
+}
 function recordLastRunSuccess(siteId, ts = datetime()) {
   if (!siteId) return;
   // Trim millisecond suffix so cards render "2026-05-06 09:13:43" not
@@ -3198,6 +3210,10 @@ async function getState() {
     .reduce((a, b) => (!a || b.getTime() < a.getTime() ? b : a), null);
 
   const msState = msScheduled ? (msTodayState || readMsScheduleToday()) : null;
+  // Fork-local: custom-site scraped balances (panel displays them on the
+  // per-site Sessions cards). Fresh read per poll — the runner rewrites
+  // the file on every run.
+  const customBalances = readCustomBalances();
 
   return {
     // v2.11.12: Web-UI auth state — the client refreshes AUTH_ENABLED
@@ -3238,6 +3254,7 @@ async function getState() {
         active: active.has(e.id),
         scheduleKind: e.scheduleKind || null,
         lastSuccessfulRun: lastRunSuccess[e.id] || null,
+        lastBalance: customBalances[e.id]?.balance ?? null,
         siteUrl: e.homeUrl || e.loginUrl || null,
         ...(siteStatus[e.id] || { status: 'unknown', user: null, checkedAt: null }),
       })),
@@ -8663,6 +8680,7 @@ function render() {
     else if (s.status === 'error') statusText = 'Error checking.';
     if (s.lastSuccessfulRun) statusText += ' Successful Run ' + s.lastSuccessfulRun + '.';
     else statusText += ' Successful Run: never.';
+    if (s.lastBalance != null) statusText += ' Balance ' + s.lastBalance.toLocaleString('en-US') + '.';
     const versionLabel = s.version ? '<div class="site-card-version">v' + escapeHtml(s.version) + '</div>' : '';
     // Login OR Check button, status-driven. The "force re-login" override
     // is rendered separately as a small bare icon in the card header
