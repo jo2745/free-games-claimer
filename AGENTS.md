@@ -80,3 +80,9 @@ active mainline; it is the only source of new fixes and features.
   fast-bails `readPointsBalance` on a login-domain URL. Don't "simplify" the probe away — the
   public-root `isLoggedIn` check can't see this failure mode (it's how MS Rewards went to 0
   points with a valid-looking session).
+- **CF login loop = Accept-Language mismatch** — `urlLocale()` reads the URL's *language* slot;
+  a login page speaks the *country's* language (fi.accounts.ikea.com = fi, even for an
+  …/en/fi/… rewards URL). Mismatched Accept-Language makes Cloudflare's managed challenge
+  re-trigger forever (the "Just a moment…"/"Pieni hetki" loop). Login contexts must use
+  `regionLocale(url) || urlLocale(url)` (both in `src/util.js`) — never bare `urlLocale`
+  for cc-subdomain/TLD-locale sites (IKEA).

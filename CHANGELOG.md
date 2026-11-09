@@ -4,6 +4,35 @@ Release notes for the [free-games-claimer jo2745 fork](README.md). Most recent a
 
 ---
 
+## What's new in 2.12.36
+
+Fork-local, on top of v2.12.35 (balance scrubbing + display).
+
+- **IKEA login CF-loop fix** — pressing Login on the IKEA row opened the
+  Cloudflare managed-challenge interstitial ("Pieni hetki") on the
+  *login page*, re-triggering forever. Cause: the noVNC login context's
+  Accept-Language followed the configured URL's **language** slot, but
+  the login page (fi.accounts.ikea.com) always speaks the **country's**
+  language — an English-variant rewards URL (…/en/fi/…) sent `en-FI`
+  at the Finnish CF edge, which fails the fingerprint check on every
+  retry. `src/util.js` gains `regionLocale()` (locale from the region
+  slot / region subdomain, using the country's default language); the
+  panel's login/verify/cookie contexts and the IKEA runner now use
+  `regionLocale || urlLocale` — the locale always matches the edge the
+  page actually sits on, on any language variant of the URL. Mainline
+  sites are untouched (their login URLs carry no region signal, so the
+  old path applies exactly as before).
+- **Digitalcore balance under-read fix** — the status tile renders
+  both "4,650" and "4650" in sibling nodes; the old parser stripped
+  everything non-numeric from the whole container and merged them,
+  reading `46504650 → 4650` (a 10× under-read). The in-page scan now
+  returns only the **last child's** raw text, and the parse lives in
+  module scope (`parseBalanceText`): separator resolved by tail-chunk
+  width (3 digits = thousands, 1–2 = decimal tail), so "4,650" → 4650
+  and "1.234.567" → 1234567 on any locale's punctuation.
+
+---
+
 ## What's new in 2.12.35
 
 Fork-local, on top of v2.12.34 (mainline sync + MS stale-session fix).

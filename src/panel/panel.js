@@ -3,7 +3,7 @@ import net from 'node:net';
 import { spawn, execFile } from 'node:child_process';
 import { watch, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
-import { datetime, notify, jsonDb, normalizeTitle, cleanProfileLocks, readDigestBuffer, markDigestFlushed, stripGpTail, dataDir, rootDir, urlLocale, isNetworkErrorMessage } from '#src/util.js';
+import { datetime, notify, jsonDb, normalizeTitle, cleanProfileLocks, readDigestBuffer, markDigestFlushed, stripGpTail, dataDir, rootDir, urlLocale, regionLocale, isNetworkErrorMessage } from '#src/util.js';
 import { launchContext } from '#src/browser.js';
 import { epicImportMissingSessionReason } from '#src/epic-session.js';
 import { cfg } from '#src/config.js';
@@ -356,8 +356,12 @@ async function launchSite(siteId) {
     contextOptions: { headless: false, ...(site.contextOptions || {}) },
     // Browser locale aligned to the page's language (e.g. fi-FI for a /fi/fi/
     // IKEA page) — keeps the --lang/--accept-lang flags and the context
-    // option in agreement with the page being visited.
-    locale: urlLocale(site.loginUrl) || undefined,
+    // option in agreement with the page being visited. Region-first
+    // (fork-local): the login page speaks the COUNTRY's language, which
+    // the configured URL's language slot may not (…/en/fi/… is English
+    // content on the Finnish edge) — urlLocale() alone read en-FI there
+    // and Cloudflare re-challenged the login page forever.
+    locale: regionLocale(site.loginUrl) || urlLocale(site.loginUrl) || undefined,
   });
 
   context.setDefaultTimeout(0);
@@ -441,7 +445,7 @@ async function checkSiteStatus(siteId) {
       record: false,
       sigint: false,
       contextOptions: { headless: false, ...(site.contextOptions || {}) },
-      locale: urlLocale(site.loginUrl) || undefined,
+      locale: regionLocale(site.loginUrl) || urlLocale(site.loginUrl) || undefined,
       extraArgs: ['--no-sandbox', '--disable-gpu'],
     }));
     const result = await site.checkLogin(page);
@@ -548,7 +552,7 @@ async function importSiteCookies(siteId, rawCookies) {
       record: false,
       sigint: false,
       contextOptions: { headless: false, ...(site.contextOptions || {}) },
-      locale: urlLocale(site.loginUrl) || undefined,
+      locale: regionLocale(site.loginUrl) || urlLocale(site.loginUrl) || undefined,
     }));
     await context.addCookies(normalized);
   } finally {

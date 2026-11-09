@@ -28,6 +28,27 @@ const SITE_BALANCE_SELECTORS = {
   'digitalcore.club': '#statusBox > div > div:nth-child(4) > span:nth-child(1) > span',
 };
 const BALANCES_FILE = dataDir('custom-balances.json');
+// Numeric text → integer balance. The in-page scan returns RAW text
+// (module scope = the single copy of the parse; the in-page context can't
+// see it). The balance node's container often renders BOTH a grouped
+// ("4,650") and a plain ("4650") value in sibling nodes; a naive
+// strip-and-merge of the whole textContent reads "4,6504650" → 4650 and
+// under-reports by 10× (digitalcore, 2026-11-09). Separator resolved by
+// the tail chunk's width: 3 digits = thousands separator (1.234.567 →
+// 1234567), 1–2 digits = decimal tail ("1,5" → 1; points counters don't
+// have fractions, but a grouped value like "4,650" also lands here —
+// in-page extraction takes the last child only, so the plain node is what
+// gets parsed in that layout).
+function parseBalanceText(text) {
+  const parts = String(text ?? '').trim().split(/[.,\s\u00a0]+/).filter(p => /^\d+$/.test(p));
+  if (!parts.length) return null;
+  if (parts.length === 1) return parseInt(parts[0], 10);
+  if (parts[parts.length - 1].length === 3) {
+    const n = parseInt(parts.join(''), 10); // "1 234" / "1.234.567"
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  return parseInt(parts[0], 10); // "4,650" → 4650 / "1,5" → 1
+}
 
 // Settle time after page load so the site's daily check-in beacon has
 // fired before we move on. 10s (fork-local; upstream ships 2s) — some
@@ -106,12 +127,16 @@ for (const site of sites) {
         const host = new URL(site.url).host;
         const selector = SITE_BALANCE_SELECTORS[host];
         if (selector) {
-          balance = await page.evaluate((sel) => {
+          // In-page: return RAW text of the LAST element in the chain only.
+          // The container may hold both a grouped ("4,650") and a plain
+          // ("4650") node as siblings; concatenating their textContent is
+          // unparseable, while the last child is the plain value.
+          const text = await page.evaluate((sel) => {
             const el = document.querySelector(sel);
             if (!el) return null;
-            const n = parseInt((el.textContent || '').replace(/[^\d]/g, ''), 10);
-            return Number.isFinite(n) && n > 0 ? n : null;
+            return ((el.lastElementChild && el.lastElementChild.textContent) || el.textContent || '').trim();
           }, selector).catch(() => null);
+          if (text) balance = parseBalanceText(text);
           if (balance != null) {
             log.status('balance', balance.toLocaleString('en-US'));
             balances[site.id] = { url: site.url, balance, at: datetime() };

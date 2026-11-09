@@ -39,9 +39,8 @@
 // as lenovo-gaming's in-frame extraction.
 
 import { launchContext, gotoWithRetry } from '#src/browser.js';
-import { urlLocale } from '#src/util.js';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { datetime, notify, log, dataDir, handleSIGINT } from '#src/util.js';
+import { datetime, notify, log, dataDir, handleSIGINT, urlLocale, regionLocale } from '#src/util.js';
 import { cfg } from '#src/config.js';
 import { SITES_BY_ID } from '#src/sites.js';
 
@@ -120,11 +119,13 @@ try {
     profileDir,
     record: false,
     sigint: false, // handleSIGINT() above owns SIGINT
-    // Browser locale aligned to the rewards page's country/language (fi/fi
-    // ⇒ fi-FI) — keeps Accept-Language matching the page, so IKEA serves
-    // the local language instead of 302-ing onto the English path, and
-    // its Cloudflare check doesn't loop on a fingerprint mismatch.
-    locale: urlLocale(URL) || undefined,
+    // Browser locale aligned to the rewards page's COUNTRY (region-first:
+    // the fi CF edge serves Finnish even when the configured URL is the
+    // English variant …/en/fi/… — an Accept-Language following the URL's
+    // language slot trips the managed challenge and loops it forever; the
+    // local language keeps CF quiet instead of 302-ing onto the wrong
+    // locale).
+    locale: regionLocale(URL) || urlLocale(URL) || undefined,
   }));
   context.setDefaultTimeout(cfg.debug ? 0 : cfg.timeout);
 

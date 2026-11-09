@@ -182,6 +182,48 @@ export const urlLocale = (url) => {
     return null;
   } catch { return null; }
 };
+// Region-only counterpart of urlLocale, for LOGIN flows. The configured
+// page URL carries a LANGUAGE (…/en/fi/… is English content for a
+// Finnish region), but the account/login page it 302s onto always speaks
+// the COUNTRY's default language (fi.accounts.ikea.com speaks fi, on the
+// fi Cloudflare edge). A browser whose Accept-Language follows the URL's
+// language slot (en-FI) therefore mismatches the login page (fi) — and
+// Cloudflare's managed challenge re-trips on that fingerprint mismatch
+// forever (the "Pieni hetki" / "Just a moment…" loop that stuck IKEA
+// logins, 2026-11-09). Deriving the locale from the region slot (or the
+// region subdomain label, fi.accounts.*) aligns with what the login page
+// actually serves, on any language variant of the configured URL.
+export const regionLocale = (url) => {
+  try {
+    const u = new URL(String(url || ''));
+    const seg = u.pathname.split('/').filter(Boolean);
+    const tld = u.hostname.split('.').pop();
+    const labels = u.hostname.split('.');
+    let region = null;
+    // TLD-shaped (www.ikea.lt/…): region is the TLD itself.
+    if (TLD_REGION.has(tld) && LOCALE_DEFAULT[tld]) region = tld;
+    // Path-shaped: try the first slot, then the second (the en/fi URL
+    // shape puts the region in slot 2). First slot that maps in
+    // LOCALE_DEFAULT wins.
+    if (!region) {
+      for (const cand of [seg[0], seg[1]]) {
+        if (cand && /^[a-z]{2,3}$/i.test(cand) && LOCALE_DEFAULT[cand.toLowerCase()]) {
+          region = cand.toLowerCase();
+          break;
+        }
+      }
+    }
+    // Subdomain-shaped (fi.accounts.ikea.com/…): the leading label is the
+    // region (three labels means a subdomain is present).
+    if (!region && labels.length >= 3 &&
+        /^[a-z]{2,3}$/i.test(labels[0]) && LOCALE_DEFAULT[labels[0].toLowerCase()]) {
+      region = labels[0].toLowerCase();
+    }
+    if (!region || !LOCALE_DEFAULT[region]) return null;
+    const lang = LOCALE_DEFAULT[region];
+    return lang === 'no' ? `nb-${region.toUpperCase()}` : `${lang}-${region.toUpperCase()}`;
+  } catch { return null; }
+};
 
 // Chromium launch flags matching the context `locale` (pass siteLocale(id)):
 // set --lang/--accept-lang and disable auto-translate so DOM text stays in the
