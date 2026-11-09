@@ -4,6 +4,30 @@ Release notes for the [free-games-claimer jo2745 fork](README.md). Most recent a
 
 ---
 
+## What's new in 2.12.37
+
+Fork-local. Fixes the digitalcore balance mis-read (panel showed 4650;
+the balance is 46.50 — the page's "46,50" is a decimal-comma display).
+
+- **Read the VISIBLE value, not the hidden twin** — digitalcore's status
+  tile renders the same balance in several sibling nodes in different
+  formats (a hidden US-grouped "4,650" next to the visible "46,50");
+  the old scrape grabbed the hidden one and the heuristic parsed it as
+  4650, 100× the real value. The in-page scan now collects every leaf
+  node and the runner prefers VISIBLE text; if the page shows
+  conflicting renderings, all of them are logged (mismatch warning).
+- **Per-host display style** — `SITE_BALANCE_STYLES` in
+  `custom-website.js` pins the ambiguous separator: digitalcore is
+  'decimal-comma' (46,50 = 46.50 → Balance 46, the fraction floors —
+  never a 0,5→1 carry). Other hosts add one line to the map
+  ('thousands-comma' | 'plain-int' | omitted = tail-width fallback).
+- **Raw text in the log** — the balance line now reads
+  `balance: 46 (page: "46,50")`, so any mismatch with the actual
+  balance is visible at a glance in `docker logs`; the raw string is
+  also stored in `data/custom-balances.json`.
+
+---
+
 ## What's new in 2.12.36
 
 Fork-local, on top of v2.12.35 (balance scrubbing + display).

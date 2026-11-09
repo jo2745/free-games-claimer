@@ -38,7 +38,13 @@ active mainline; it is the only source of new fixes and features.
   (`SITE_BALANCE_SELECTORS` map in the runner — per-host CSS path, currently digitalcore.club's
   `#statusBox` tile) and persists it to `data/custom-balances.json`; the panel reads that file on
   every state poll and shows `Balance N` on the per-site Sessions cards (read it there, not from
-  the run marker, so the value survives panel restarts).
+  the run marker, so the value survives panel restarts). The in-page scan reads VISIBLE leaf nodes
+  only (digitalcore renders the value in a hidden US-grouped twin "4,650" next to the visible
+  "46,50" — picking the wrong node mis-reads the balance 100×), and the per-host display style
+  (`SITE_BALANCE_STYLES`: 'decimal-comma' | 'thousands-comma' | 'plain-int' | omitted = fallback)
+  pins the ambiguous separator (digitalcore = fractional points, decimal comma). The raw page text
+  is logged next to the number — if the owner says a balance is wrong, the `(page: "...")` string
+  in the log tells you exactly what to fix in the style map.
 
 - **IKEA Family rewards watcher** — `src/platforms/ikea-rewards.js` + `urlLocale()` in `src/util.js`
   (browser language pinned to the page's locale).
@@ -57,8 +63,12 @@ active mainline; it is the only source of new fixes and features.
 - Four-part tags `vX.Y.Z.W` mark fork-local changes; mainline syncs keep the plain version.
 - Every user-visible change gets a CHANGELOG entry; fork-local ones use `## What's new in X.Y.Z.W`.
 
-## Landmines (curated — full list lives in feldorn's CLAUDE.md on GitHub)
+## Landmines (curated for this fork)
 
+- **Displayed numbers are ambiguous strings** — "46,50" is 46.50 (decimal comma), 4,650 (US
+  grouping), or a mangled 46,50; no parser resolves that from the string alone. Never guess in a
+  heuristic: pin a per-host display style (`SITE_BALANCE_STYLES` in custom-website.js) and log
+  the RAW page text next to the parsed value (`(page: "...")`).
 - **`PANEL_HTML` is a giant backtick template literal** — regex escapes inside it must be doubled
   (`\\d`, `\\/`); a bare backtick in the body ends the template and Node crashes at import.
 - **`evaluate()` in-page copies of regexes drift from module-scope copies** — pass pattern strings

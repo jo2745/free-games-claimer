@@ -27,27 +27,51 @@ const SITE_BALANCE_SELECTORS = {
   // digitalcore.club status box, 4th tile (user-provided 2026-10).
   'digitalcore.club': '#statusBox > div > div:nth-child(4) > span:nth-child(1) > span',
 };
+// Per-host display style for the balance string — a comma in a short
+// number is ambiguous ("46,50" is 46.50 on digitalcore, 4,650 in US
+// grouping) and no parser resolves it from the string alone; the owner
+// knows, the parser doesn't. Pin a host's style here when its display
+// differs from the tail-width fallback ('decimal-comma' | 'thousands-comma'
+// | 'plain-int'; omitted = fallback heuristic).
+const SITE_BALANCE_STYLES = {
+  // digitalcore.club: fractional points, decimal-comma display — "46,50"
+  // means 46.50 (owner-verified against the site, 2026-11-09; the old
+  // thousands-read reported 4650, 100× off).
+  'digitalcore.club': 'decimal-comma',
+};
 const BALANCES_FILE = dataDir('custom-balances.json');
 // Numeric text → integer balance. The in-page scan returns RAW text
 // (module scope = the single copy of the parse; the in-page context can't
-// see it). The balance node's container often renders BOTH a grouped
-// ("4,650") and a plain ("4650") value in sibling nodes; a naive
-// strip-and-merge of the whole textContent reads "4,6504650" → 4650 and
-// under-reports by 10× (digitalcore, 2026-11-09). Separator resolved by
-// the tail chunk's width: 3 digits = thousands separator (1.234.567 →
-// 1234567), 1–2 digits = decimal tail ("1,5" → 1; points counters don't
-// have fractions, but a grouped value like "4,650" also lands here —
-// in-page extraction takes the last child only, so the plain node is what
-// gets parsed in that layout).
-function parseBalanceText(text) {
+// see it). `style` (per host, SITE_BALANCE_STYLES) pins the ambiguous
+// separator: 'decimal-comma' — first chunk is the integer part, the
+// fraction FLOORS ("46,50" → 46; a 0,5 fraction must not round up to
+// 47 — digitalcore's points are fractional); 'thousands-comma' — merge
+// all chunks ("1,234" → 1234); 'plain-int' — merge and strip (legacy).
+// No style = tail-width fallback: 3-digit tail = thousands separator, 1–2
+// digits = decimal tail ("46,50" → 46) — correct when the site matches,
+// wrong when it doesn't, which is why the raw text is logged next to the
+// number so a mismatch is visible at a glance.
+function parseBalanceText(text, style) {
   const parts = String(text ?? '').trim().split(/[.,\s\u00a0]+/).filter(p => /^\d+$/.test(p));
   if (!parts.length) return null;
-  if (parts.length === 1) return parseInt(parts[0], 10);
+  const first = parseInt(parts[0], 10);
+  if (style === 'decimal-comma') {
+    return Number.isFinite(first) && first > 0 ? first : null;
+  }
+  if (style === 'thousands-comma') {
+    const n = parseInt(parts.join(''), 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  if (style === 'plain-int') {
+    const n = parseInt(parts[0].concat(parts.slice(1).join('')), 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  if (parts.length === 1) return Number.isFinite(first) && first > 0 ? first : null;
   if (parts[parts.length - 1].length === 3) {
     const n = parseInt(parts.join(''), 10); // "1 234" / "1.234.567"
     return Number.isFinite(n) && n > 0 ? n : null;
   }
-  return parseInt(parts[0], 10); // "4,650" → 4650 / "1,5" → 1
+  return Number.isFinite(first) && first > 0 ? first : null;
 }
 
 // Settle time after page load so the site's daily check-in beacon has
@@ -127,19 +151,38 @@ for (const site of sites) {
         const host = new URL(site.url).host;
         const selector = SITE_BALANCE_SELECTORS[host];
         if (selector) {
-          // In-page: return RAW text of the LAST element in the chain only.
-          // The container may hold both a grouped ("4,650") and a plain
-          // ("4650") node as siblings; concatenating their textContent is
-          // unparseable, while the last child is the plain value.
-          const text = await page.evaluate((sel) => {
+          // In-page: return the text of every LEAF (element-leaf) node,
+          // tagged with visibility. Sites render the same value in several
+          // sibling nodes with DIFFERENT formatting (digitalcore: a hidden
+          // US-grouped "4,650" next to the visible "46,50") — only the
+          // visible ones are what's actually displayed.
+          const candidates = await page.evaluate((sel) => {
             const el = document.querySelector(sel);
             if (!el) return null;
-            return ((el.lastElementChild && el.lastElementChild.textContent) || el.textContent || '').trim();
+            const leaves = [...el.querySelectorAll('*')].filter(n => !n.querySelector('*'));
+            return leaves
+              .map(n => ({ text: (n.textContent || '').trim(), visible: !!n.offsetParent }))
+              .filter(x => x.text);
           }, selector).catch(() => null);
-          if (text) balance = parseBalanceText(text);
+          // Visible text wins; if the page shows several distinct
+          // renderings, log the mismatch — the owner's eye settles it
+          // (the raw strings are right there in the log line below).
+          let text = null;
+          if (candidates && candidates.length) {
+            const pool = candidates.filter(c => c.visible);
+            const src = pool.length ? pool : candidates;
+            const uniq = [...new Set(src.map(c => c.text))];
+            text = uniq[0];
+            if (uniq.length > 1) log.warn(`balance display mismatch on ${site.name}: ${uniq.map(t => `"${t}"`).join(', ')}`);
+          }
+          if (text) balance = parseBalanceText(text, SITE_BALANCE_STYLES[host] || null);
           if (balance != null) {
-            log.status('balance', balance.toLocaleString('en-US'));
-            balances[site.id] = { url: site.url, balance, at: datetime() };
+            // Raw page text next to the parsed value: the display is
+            // ambiguous, so a mismatch with the owner's actual balance
+            // is obvious at a glance — fix the host's style in
+            // SITE_BALANCE_STYLES, not the heuristic.
+            log.status('balance', `${balance.toLocaleString('en-US')} (page: "${text}")`);
+            balances[site.id] = { url: site.url, balance, at: datetime(), raw: text };
             saveBalances();
           }
         }
