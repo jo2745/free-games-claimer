@@ -582,6 +582,14 @@ export const notify = (html, opts = {}) => {
   }));
 };
 
+// Chromium's network-layer failure family (DNS, link down, connection
+// reset). These say the host's network went away, not that a site's DOM or
+// flow changed — nothing in a runner can fix them. Shared by the per-site
+// recoverable-nav guards (epic-games.js, microsoft.js) and the panel's
+// diagnostic recorder, which keeps them transient so they never nag (#158).
+export const NETWORK_ERROR_RE = /ERR_ADDRESS_UNREACHABLE|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ERR_NETWORK_CHANGED|ERR_CONNECTION_RESET|ERR_TIMED_OUT/i;
+export const isNetworkErrorMessage = msg => NETWORK_ERROR_RE.test(String(msg || ''));
+
 export const escapeHtml = unsafe => unsafe.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll('\'', '&#039;');
 
 // Captcha pause helper. Per-service state machine in process memory drives
@@ -760,8 +768,12 @@ export const log = {
   game: (name, status) => {
     console.log(`    ${chalk.blue(name)} ${chalk.dim('→')} ${status}`);
   },
+  // Deliberate skip (filter, price/rating floor, DLC without base game,
+  // quality gate, region). Neutral dim `–`, NOT a red ✗ — ✗ is reserved for
+  // real failures (log.fail / log.exception) so failures stand out in the
+  // run log. See feedback_aggregate_log_verbosity.
   skip: (name, reason) => {
-    console.log(`    ${chalk.red('✗')} ${chalk.dim(name)} — ${chalk.yellow(reason)}`);
+    console.log(`    ${chalk.dim('–')} ${chalk.dim(name)} — ${chalk.dim(reason)}`);
   },
   ok: (msg) => {
     console.log(`    ${chalk.green('✓')} ${msg}`);

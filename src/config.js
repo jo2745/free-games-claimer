@@ -20,6 +20,7 @@ const gog   = svc['gog']          || {};
 const steam = svc['steam']        || {};
 const ae    = svc['aliexpress']   || {};
 const ms    = svc['microsoft']    || {};
+const joybuy = svc['joybuy']       || {};
 const lenovo = svc['lenovo-gaming'] || {};
 const cw    = svc['custom-website'] || {};
 
@@ -107,6 +108,7 @@ export const cfg = {
   eg_otpkey: process.env.EG_OTPKEY,
   eg_parentalpin: process.env.EG_PARENTALPIN,
   eg_mobile: eg.claimMobile ?? true, // claim mobile games
+  eg_captcha_wait: (eg.captchaWaitMin ?? 3) * 60 * 1000, // how long a claim waits for a manual captcha solve
   // auth prime-gaming
   pg_email: process.env.PG_EMAIL || process.env.EMAIL,
   pg_password: process.env.PG_PASSWORD || process.env.PASSWORD,
@@ -167,6 +169,10 @@ export const cfg = {
   // to invoke any claim script, so no script-internal guard is needed.
   ae_email:    process.env.AE_EMAIL    || process.env.EMAIL,
   ae_password: process.env.AE_PASSWORD || process.env.PASSWORD,
+  ae_missions: process.env.AE_MISSIONS === '1' || ae.missions === true,
+  joybuy_email:    process.env.JOYBUY_EMAIL    || process.env.EMAIL,
+  joybuy_password: process.env.JOYBUY_PASSWORD || process.env.PASSWORD,
+  joybuy_page_url: process.env.JOYBUY_PAGE_URL || joybuy.pageUrl,
   // experimental
   pg_redeem: pg.redeem ?? false, // prime-gaming: redeem keys on external stores
   // Prime→Steam auto-redeem (v2.11.0). When true, Prime captures every Steam

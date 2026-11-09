@@ -4,6 +4,382 @@ Release notes for [Feldorn's Free Games Claimer](README.md). Most recent at the 
 
 ---
 
+## What's new in 2.12.33
+
+**Epic: you now have 3 minutes to solve a captcha, not under one.**
+
+When Epic showed a captcha, the claim still gave up after the normal 60-second page timeout, counted from the click. That left under a minute to see the notification, open the browser view and solve the hCaptcha, so a captcha you did solve often still ended as "failed to claim". The in-run retry had the same limit.
+
+Once a captcha is detected, the claim now keeps waiting for up to 3 minutes for it to be solved, on the first attempt and on the retry. The log and the notification say how long you have ("solve within 3 min"). You can change this under Settings → Services → Epic Games → **Captcha solve time (minutes)**, or with `EG_CAPTCHA_WAIT_MIN`. Runs without a captcha aren't affected. If nobody solves it, the game fails as before, just later.
+
+---
+
+## What's new in 2.12.32
+
+**Prime Gaming: a Legacy Games code is no longer lost on non-English Luna.**
+
+After claiming a Legacy Games game, the claimer looked for a "Click here" link to find the redeem page. On luna.amazon.de and other non-English sites that text doesn't exist, so it waited 60 seconds and gave up. The code was only saved after that step, so it was lost, and Amazon doesn't show a collected game again. The code is now saved first, and the link is found by its legacygames.com address in any language.
+
+**Prime Gaming: one stuck game no longer stops the rest of the run.**
+
+- The claim button is now found with a single 30-second check. Before, an unrecognised page meant six 60-second waits and then an error that ended the whole Prime run. Leftover clicks could also land on the next game's page.
+- If a game fails, it's logged and the run continues with the next one. If Amazon already counted it as claimed and only the redeem step failed, it's reported as needing manual redeem, with the code.
+- Game pages get the same retry as the main claims page, and scrolling the claims list can no longer hang.
+- The overview screenshot and the DLC check can no longer mark an otherwise successful run as failed.
+
+**Epic: the captcha retry now works on non-English accounts.**
+
+When a game hit a captcha, the retry later in the run only recognised English button labels. On a German account every retry ended with "unexpected button". It now uses the same multi-language matching as the main claim.
+
+**Epic: fewer 60-second stalls.**
+
+- A store page that hasn't shown its button after 30 seconds is reloaded once.
+- The background helpers for the license agreement, parental PIN, "I Agree" and captcha now stop after 30 seconds, so they can't act on the next game's page.
+- The free-games API call and the Steam rating lookups (quality filter) now time out instead of hanging.
+
+Thanks to @sellwanger, whose PR (#178) found and fixed all of the above. It's ported here with two small changes.
+
+---
+
+## What's new in 2.12.31
+
+**Epic: one gated game no longer stops the whole Epic run.**
+
+Some Epic store pages show a gate with a **Continue** button that stays disabled. Most likely it's a redesigned date-of-birth prompt that the claimer doesn't fill in yet. The claimer clicked it and waited 60 seconds, and the timeout ended the entire Epic run. Because that game was never recorded, the next run stopped at the same game again, so no Epic games were claimed at all. The click now gives up after 15 seconds: that game is marked failed (with a screenshot in `data/screenshots/epic-games/failed/`) and the run moves on to the other games. Thanks to @TheDevRo for the report (#180).
+
+---
+
+## What's new in 2.12.30
+
+**AliExpress: optional missions on top of the daily check-in.**
+
+The coin page also pays coins for visiting pages, but the claimer only did the check-in. With **Also do the browse missions and the quiz** on (Settings → Per-service → AliExpress, or `AE_MISSIONS=1`), each run now does those missions after the check-in: it clicks the page's own button, stays on the opened page for the time the mission asks for, and reads what AliExpress paid. At about 15 seconds per mission, this adds a few minutes to a run. It then answers the daily coin quiz. AliExpress only reveals the right answer afterwards, so a new question is a best guess and the answer is saved in `data/aliexpress.json` for when that question comes back.
+
+Only visit-a-page missions that pay coins on an aliexpress.com page, the quiz, the "turn on notifications" reward and the "daily check-in" mission (which unlocks the quiz) are done. Missions that act on your account (cart, share), app-only missions (farm, shortcut, widget) and missions that ask for clicks on sponsored items are never touched. A mission problem can't cost the day's coins: the missions run after the check-in and stop on their own after repeated failures or a verification prompt.
+
+It's off by default because more automated activity may draw more attention from AliExpress's bot detection. The run notification and `data/aliexpress.json` now include the mission count.
+
+**AliExpress: runs no longer sit idle for 3 minutes after the check-in.** The streak, tomorrow's coins and € total are missing from the redesigned page, and each lookup waited out the full 60-second timeout. They now give up after 3 seconds.
+
+Thanks to @isthevao for this (#177).
+
+---
+
+## What's new in 2.12.29
+
+**Run log: skipped games no longer look like failures.**
+
+A game the claimer skips on purpose used to get the same red ✗ as a real failure. That covers games below your minimum price or rating, DLC whose base game you don't own, games blocked by the quality filter, and games not available in your region. They now get a grey `–`, so a red ✗ in the log always means something actually went wrong. This applies to Steam, Epic, FAB, GOG and Prime Gaming. Skip counts and failure counts are unchanged.
+
+---
+
+## What's new in 2.12.28
+
+**Microsoft Rewards: a failed activity-card click can no longer crash the run.**
+
+When a Daily Set card click failed because the dashboard had redrawn under it, the extra details the claimer saves for debugging made patchright, the browser-automation library the claimer uses, fail in a way the claimer couldn't catch. That crashed the whole Microsoft Rewards run before any searches, so it earned 0 points (seen on 27 October; a re-run 30 minutes later was fine). The claimer now finds the card on the page again before saving those details, so a stale card is logged and skipped and the searches still run.
+
+---
+
+## What's new in 2.12.27
+
+**Epic Games: the false "No free games available in your region" message is gone, and the wait with it.**
+
+The "Free Now" tile on Epic's page was there all along, and the claimer was picking the game up from it. The step that waits for the tile to appear was what kept timing out, so every run paused (60 seconds before 2.12.26, 15 seconds after) and then wrongly reported that no free games were available. The claimer now waits only until the tile is on the page, which takes milliseconds. The "No free games" message is now shown only when the page and Epic's free-games list both come back empty.
+
+---
+
+## What's new in 2.12.26
+
+**Epic Games: no more 60-second wait for "Free Now" tiles.**
+
+Each Epic run first waits for the "Free Now" tiles on Epic's free-games page. Since Epic's 30 October rotation the claimer has stopped finding them, so every run waited the full 60 seconds and then logged "No free games available in your region", even though that week's game (Sorry We're Closed) was free.
+
+- When Epic's free-games list (its promotions API) is reachable, which it normally is, the claimer waits at most 15 seconds for the tiles.
+- Free games in that list that the page didn't show are now added to the run directly, so a change to Epic's page layout can't hide the weekly game. The log says when this happens.
+- The 60-second wait is only used if the list can't be loaded.
+- A GamerPower link for a game that's already queued (often the same page with `?lang=en-US` on the end) no longer causes a second visit to that page.
+
+---
+
+## What's new in 2.12.25
+
+**Epic Games: captchas that appear before checkout are now recognised and retried.**
+
+Epic sometimes shows its "One more step / Please complete a security check" hCaptcha before the checkout window opens, instead of inside it. The claimer only looked for captchas inside the checkout window, so in that case it waited 60 seconds and logged a plain "failed to claim". It sent no solve-now notification and didn't retry in the same run.
+
+- Captcha detection now checks every frame on the page for a visible hCaptcha challenge or the "One more step" screen, so it catches both layouts.
+- The solve-now push is sent as soon as the captcha appears, wherever it shows up, giving you time to solve it through the panel's browser view.
+- A game blocked this way is now retried in the same run, like other captcha failures.
+- If the captcha comes back on that retry, you get another solve-now push, and the log says it will be tried again on the next run. It used to time out without saying why.
+
+---
+
+## What's new in 2.12.24
+
+**Microsoft Rewards: one slow page load no longer costs the day's searches (#175).**
+
+When the Rewards dashboard took more than 60 seconds to reload after the activity cards, the timeout ended the whole desktop session. No searches ran, but the run still finished as a success with "+0".
+
+- A page timeout in the activity-card, bonus-points or ready-to-claim step now skips that step instead of ending the session, the same way network errors already did.
+- Those dashboard reloads now wait for the page itself, not every image and script on it, so they time out less often.
+- If any of those optional steps fails for another reason, the searches still run.
+- If the desktop session does stop early, the end-of-run notification says so and suggests re-running from the panel.
+
+**Prime Gaming: a missing key no longer stops the rest of the Prime run (#174).**
+
+If an external game (for example a GOG key) was claimed but its code never appeared on the claim page, the run stopped with "All promises were rejected" and skipped every game after it. That game is now marked `claimed, code not found`, the notification links to its claim page so you can copy the key, and the run carries on.
+
+---
+
+## What's new in 2.12.23
+
+**Epic: sign back in from the account switcher automatically (#163).**
+
+When Epic's account session runs out on a device it still knows, its login page shows an account switcher (your account as a single button) instead of the email form. Clicking your account signs you back in without a password, but the claimer didn't know that page: a scheduled run gave up as "not signed in", and the after-run session check sent a "session expired" notification.
+
+- The Epic run now clicks your account on the switcher before giving up, so scheduled runs recover by themselves.
+- The session check (Sessions tab Check, and the check after each scheduled run) does the same click before reporting Epic as expired.
+- If the switcher lists several accounts, it only clicks the one matching `EG_EMAIL` and otherwise leaves it to you.
+- When Epic's own account check can't be reached (timeout, Cloudflare page), the fallback cookie check now also counts `EPIC_SESSION_AP`, which signs you in on its own. Before, a profile with only that cookie left could be reported as expired.
+
+---
+
+## What's new in 2.12.22
+
+**Joybuy: daily JoyPoints check-in.**
+
+Joybuy (JD.com's European portal) offers daily loyalty JoyPoints redeemable for discounts on orders. This adds daily check-in support for JoyPoints on the mobile web portal (`m.joybuy.fr/joypoints-h5`).
+
+- Daily check-in collects points, tracks streaks (7-day and 3-day series), and logs estimated euro value in the panel Stats tab.
+- Anti-detection mobile emulation using `fingerprint-generator` and `fingerprint-injector` persists to `data/browser-joybuy/.fgc-fingerprint.json`.
+- Session verification in the Sessions card, login auto-detection, and slider captcha handoff via noVNC.
+- Opt-in: enable in Settings → Per-service → Joybuy, or set `JOYBUY_ACTIVE=true`.
+
+---
+
+## What's new in 2.12.21
+
+**Epic: a rejected account session now says why Epic rejected it (#163).**
+
+When Epic turns down the account session (Check, cookie import, or the start of a run), the message used to show only the HTTP status, e.g. `account check returned HTTP 401`. It now also includes the error code Epic sends back, e.g. `HTTP 401, errors.com.epicgames.unauthorized`. In most cases the cause is the missing `EPIC_SESSION_AP` cookie, which the import already points out. For the cases where every cookie is there and Epic still says no, the error code is the next clue, and it's now in the message you'd paste into an issue.
+
+---
+
+## What's new in 2.12.20
+
+**Fix: the quality filter's "Applies to" setting couldn't be saved with Epic or Steam in it (#173).**
+
+Saving Settings → Advanced → Quality filter → **Applies to** with `epic-games` or `steam` in the list failed with `unknown service 'epic-game'` (or `'team'`), even though the box showed the right names. The panel split the list on commas and on the letter "s" instead of commas and spaces, because an escape in the page's code was lost. Since 2.12.0, a list with only `gog`, `prime-gaming` and `fab` was the only kind that saved. If you set up the quality filter before, open Settings and check that **Applies to** has every service you meant to include.
+
+- The list is now split on commas and spaces, as intended.
+
+---
+
+## What's new in 2.12.19
+
+**Fix: noVNC could stay dead for 10+ minutes after every container start on some hosts (#172).**
+
+On Proxmox LXC and some newer Docker/systemd setups, the noVNC viewer stayed on "Connecting..." after every restart, while websockify (the program that bridges noVNC to the VNC server) sat at 100% CPU. websockify was started with `-D` (daemon mode), which first tries to close every possible file descriptor up to the container's hard open-files limit, and only starts listening after that. On those hosts the limit is about a billion, so that loop runs for minutes before noVNC can connect. Most Docker hosts use a much lower limit, so they never saw it.
+
+- websockify now starts without `-D`. It was already started in the background, so the daemon step wasn't needed.
+- Its output now goes to `data/websockify.log` instead of being discarded, so a future noVNC problem leaves a trace.
+
+---
+
+## What's new in 2.12.18
+
+**Fix: AliExpress failed with "page never finished loading" after the day's coins were collected (#170, #171).**
+
+AliExpress has redesigned the mobile coin page. Once today's coins are collected, the new page has no `#signButton`, no buttons and no "day streak" heading, so none of the claimer's markers matched. Each run then reloaded the page three times and failed with an empty diagnostic dump, even though the page had loaded fine. The first run of the day still collected the coins; every run after that failed.
+
+- Run and **Check** now recognise the redesigned page's "checked in today" state, so a run after collecting reports "No more coins to collect today!" instead of failing.
+- The coin balance is read from the API the new page uses. It showed as `null` / 0 coins since the redesign.
+- If the page changes again, the diagnostic dump now includes the page text and its `aecoin-*` class names instead of only headings and buttons.
+- Not verified yet: collecting on the new page before today's check-in. The first run on 2026-10-25 collected with the existing markers.
+
+---
+
+## What's new in 2.12.17
+
+**Fix: Epic cookie import now says why it fails when the export is missing Epic's account login (#162, #163).**
+
+On 2.12.16, fresh Epic cookie exports were rejected at once with `account check returned HTTP 401`, even with "Remember me" ticked and the .epicgames.com cookies included. The cookie that holds the Epic account login, `EPIC_SESSION_AP`, only applies to `www.epicgames.com/id` pages. Cookie-Editor and EditThisCookie export only the cookies the open tab can see, so an export taken on the store never includes it. Without it Epic rejects the login, even with a fresh `EPIC_SSO` and `EPIC_SSO_RM`, and no page visit brings it back.
+
+- When an Epic import fails and the upload has no `EPIC_SESSION_AP`, the message now says so. It tells you to open https://www.epicgames.com/id/api/account in the same logged-in browser, export from that tab and import that file too. A second import adds to the first one; nothing is replaced.
+- Export and import while that browser is still open: `EPIC_SESSION_AP` is a session cookie and is gone once the browser closes.
+- Cookie-Editor's `"sameSite": "no_restriction"` is now imported as SameSite=None instead of Lax.
+
+---
+
+## What's new in 2.12.16
+
+**Fix: Check now asks Epic whether your login still works, instead of only looking for the cookies (#163).**
+
+2.12.14 made Check look for Epic's account cookies (`EPIC_SSO` / `EPIC_SSO_RM`). That wasn't enough. In #163 a profile with a fresh remember-me cookie passed Check and still failed every claim with `Epic session lost mid-run`. Testing on a live profile showed why cookie names can't answer the question. A remember-me cookie on its own is rejected by Epic, and another session cookie can keep you logged in with no `EPIC_SSO` at all.
+
+- **Check**, **Verify**, **cookie import**, the post-run session check and the Epic run's startup check now make one read-only request to Epic's account API with your profile's cookies. If Epic says you're not authenticated, Epic shows as **not logged in**, with the reason. The run then goes into the normal login flow instead of failing at the first game.
+- If Epic can't be reached for that check (Cloudflare page, outage, timeout), it falls back to the 2.12.14 cookie check, and the run log notes that it did.
+- The "session isn't remembered" warning stays.
+
+---
+
+## What's new in 2.12.15
+
+**Fix: Prime Gaming external claims (GOG, Microsoft Store, Legacy Games keys) on non-English Amazon sites (#160).**
+
+On luna.amazon.de the claim button says "Spiel holen", and Prime looked only for the English labels "Get game" and "Claim", so every external game timed out after 60 seconds. Two more English-only steps would have broken the redeem right after:
+
+- The claim button is now found by its page attribute instead of its label, so it works in any language. The old label matches stay as a fallback.
+- The store name ("… auf GOG.com" in German) is read with the common German, French, Spanish, Italian, Portuguese, Dutch and Polish prepositions, not just "on". Before, a German page never matched GOG, so the key wasn't auto-redeemed.
+- The "Your code:" label is removed in any language before the key is stored or redeemed.
+
+---
+
+## What's new in 2.12.14
+
+**Fix: Check no longer says "logged in" to Epic when claims would fail (#163).**
+
+An Epic profile holds two separate logins. The store's own login keeps the header showing your name for up to a year. The account login, which the Get button and checkout actually need, lasts about 8 hours and is renewed only by Epic's "remember me" cookie (`EPIC_SSO_RM`). If that cookie is missing, the header still says you're logged in while every claim gets sent to the login page. That's the `Epic session lost mid-run` error behind #162, #163, #164, #167 and #168. A failing profile shared in #163 had the store cookies but no account cookies, and a cookie export that included them claimed right away.
+
+- **Check**, **Verify** after a noVNC login, and **cookie import** now also look for the account cookies. Without them Epic shows as **not logged in**, with the reason. The post-run session check flags it the same way, so you're told to log in again before the next run fails.
+- If the account session is there but not remembered, as after a login without "Remember me" or a cookie export that lacked `EPIC_SSO_RM`, Check still passes but warns when it expires. Scheduled runs after that time would fail.
+- The Epic run checks the same thing at startup. If the account session is missing, it goes into the normal login flow (stored credentials, a notification, or noVNC) instead of starting to claim and failing at the first game. The mid-run `session lost` check from 2.12.12 stays as a backstop.
+
+If you import cookies, export them while logged in to epicgames.com with "Remember me" ticked, and make sure the export includes the `.epicgames.com` cookies, not just `store.epicgames.com`.
+
+---
+
+## What's new in 2.12.13
+
+**Fix: a run where a service failed no longer shows as successful.**
+
+The panel runs the services one after another and used the exit code of the *last* one as the result of the whole run. An Epic exception in the middle of the chain (like 2.12.12's `Epic session lost` error) was logged, but the run still ended as `exit 0`. Logs showed ✓, the Sessions strip said everything was fine, and Home Assistant's `last_run_status` read `success` (#163).
+
+- Every service still runs, but the run now exits with the last non-zero code from any of them.
+- A run where any game failed to claim also counts as "last run had errors", even when the service itself exited cleanly. Examples: an Epic claim that ended early because the page closed, or a Prime game that needs account linking.
+- Microsoft Rewards still marks today's run as done when it reached its end-of-run summary, so a failure in an earlier service doesn't make the separate MS schedule run it a second time.
+- `CLAIM_CMD` / `CLAIM_CMD_MANUAL` overrides run exactly as written. If you use `;` in yours, it still reports only the last command's exit code.
+
+---
+
+## What's new in 2.12.12
+
+**Fix: a lost Epic session now says so, instead of "failed to claim" on every game.**
+
+Sometimes the Epic session dies between the login check at the start of the run and the game page. The panel's Check still shows you as logged in, but clicking Get sends the browser to Epic's login page. Before this release every free game then sat through a 60-second timeout, logged a generic `✗ failed to claim`, and the run still finished as a success (#162).
+
+- When a claim fails and the page has landed on Epic's login page (or the header says signed out), the claimer stops trying the remaining games.
+- The run ends with one clear error, `Epic session lost mid-run — re-login…`, and a matching notification. It no longer counts as a successful run.
+- The cart link for the failed games is still logged, so you can claim them by hand.
+
+To fix it: log in again from the Sessions tab or via noVNC. If Check still says you're logged in, log out of Epic in that browser first, then log back in.
+
+---
+
+## What's new in 2.12.11
+
+**Fix: Epic claims work again after Epic's store redesign.**
+
+Epic's new store design (rolled out around 2026-10-15) removed the two page elements the Epic claimer used to find things: the Get button lost its `data-testid="purchase-cta-button"`, and the checkout popup's `#webPurchaseContainer` wrapper is gone. Every new free game failed with `CTA button never loaded` (#159).
+
+- The Get button is now found as the first unlabelled button in the product sidebar (Add to Cart and Wishlist carry labels in every language). The checkout is found by its `iframe[src*="/checkout?purchaseToken="]` URL.
+- The old selectors are still tried first, so the claimer keeps working if Epic rolls back or A/B-tests the old layout.
+- Side fix: the "CTA flipped to In Library" success check passed its arguments to Playwright in the wrong order, so it always errored and its timeout was ignored. Claims that only showed up through the "confirmed via post-click CTA" fallback should now log a plain `claimed!`.
+
+Thanks to @amphoterism for the diagnosis, the patch, and a verified live claim run. Not yet exercised: bundles, non-English locales, and the EU "I Accept" step. Please report if one of those fails.
+
+---
+
+## What's new in 2.12.10
+
+**Fix: network outages no longer trigger the "report this error" banner.**
+
+When the container briefly loses DNS or connectivity, every site in that run fails with a Chromium network error (`net::ERR_NAME_NOT_RESOLVED`, `ERR_INTERNET_DISCONNECTED`, `ERR_CONNECTION_RESET`, …). These were already treated as "watching" the first time, but as soon as one recurred it was promoted to a real error and the banner asked you to file a GitHub report — even though nothing in the claimer can fix a host-side DNS problem (#158).
+
+- Network-class errors now stay in the transient "watching" state no matter how often they recur. They're still listed under Alerts → Errors, so an ongoing outage is visible, but they no longer drive the banner.
+- They're auto-cleared on the service's next successful run, like other transient errors.
+- Existing entries are cleaned up too: an undecided network-class entry is swept at panel start if the service has succeeded since its last occurrence, and re-tagged as transient on its next hit otherwise.
+- The classifier is now one shared helper (`isNetworkErrorMessage` in `src/util.js`), replacing the copies of the same regex in the Epic and Microsoft runners.
+
+If you're seeing these errors regularly, check the container's DNS: `docker exec free-games-claimer getent hosts www.gog.com` should resolve. Adding `dns: [1.1.1.1, 8.8.8.8]` to the compose service bypasses a flaky local resolver.
+
+---
+
+## What's new in 2.12.9
+
+**Fix: strict hostname check for third-party discovery URLs — substring matches are gone.**
+
+The GamerPower + r/FreeGameFindings discovery pipeline previously routed third-party URLs by substring (`url.includes("gog.com")`). A crafted entry — a malicious Reddit post, or a compromised GamerPower `/open/` page — could have slipped a lookalike URL past three different filters:
+
+- `freegamefindings.js:135` already-covered-by-another-script exclude
+- `freegamefindings.js:157` per-collector include (title + domain)
+- `gamerpower.js resolveGamerPowerHref` tab-url + anchor-href check (used when the collector follows a GamerPower `/open/` redirect to capture the real claim URL)
+
+Attack shapes `url.includes("gog.com")` passes but the strict check rejects:
+- `https://gog.com.evil.tld/x` (eTLD attached to the "allowed" string)
+- `https://evil-gog.com/x` / `https://notgog.com/x` (lookalike)
+- `https://gog.com.co/x` (allowed string as a subdomain in a different TLD)
+- `https://evil.tld/?r=gog.com` (allowed string in the query, not the host)
+- `http://www.gog.com/x` (plain-HTTP downgrade)
+
+**Fix:** new `src/url-security.js` module with `urlHasAllowedHost` / `urlHasAnyAllowedHost`:
+
+- HTTPS-only (plain-HTTP rejected).
+- Strict `hostname === allowed` match, or (opt-in) `hostname.endsWith('.' + allowed)` for subdomain acceptance.
+- Case-insensitive; trailing hostname dots stripped.
+- Garbage input (non-string, unparseable, empty hostname) returns false.
+
+All three substring-match call sites switched to the strict helper with `allowSubdomains: true` (necessary because the collector-domain lists contain apex entries like `gog.com` + `amazon.com` that must still accept `www.gog.com` / `gaming.amazon.com`). `resolveGamerPowerHref` also resolves relative anchor hrefs against the page's base URL before the host check, so an on-page relative anchor can't accidentally pass.
+
+Twenty-one unit tests at `test/url-security.js` cover every attack shape above plus the legitimate paths. Run with `node test/url-security.js`.
+
+Ported from [P-Adamiec/Free-Games-Claimer-Remaster](https://github.com/P-Adamiec/Free-Games-Claimer-Remaster)'s `src/core/url_security.py` — credit to that project's author for the pattern. The P-Adamiec file carries a comment that this exact substring issue once triggered a CodeQL alert in the upstream repo; porting the fix here closes the same class of alert at our own call sites.
+
+---
+
+## What's new in 2.12.8
+
+**Fix: Prime Gaming login is now robust to Amazon's remembered-account chooser + empty login-error alerts.** Pulled from upstream [vogler/free-games-claimer#595](https://github.com/vogler/free-games-claimer/pull/595) by @davideasaf — just the Prime-side guards.
+
+Two latent crashes in the Prime login flow:
+
+1. **`src/platforms/prime-gaming.js:80`** did `page.fill('[name=email]', email)` unconditionally. Amazon's account chooser skips the email step entirely when the account is remembered — the `[name=email]` input isn't rendered, and the fill throws. Fix: wrap in `isVisible()` so the email step is skipped when Amazon already has it.
+
+2. **`src/platforms/prime-gaming.js:85-91`** gated the login-error check on `waitForURL('**/ap/signin**')`, which also matches the initial navigation to the signin page BEFORE any error is rendered. The subsequent `.first().innerText()` on `.a-alert-content` then threw on an empty match set. Fix: gate on `loginError.waitFor({ state: 'visible' })` (the actual alert element), then `.innerText()`. Also wraps the whole chain in `.catch(_ => {})` so a timeout on the successful-login path doesn't surface as an unhandled rejection.
+
+Credit to @davideasaf for the upstream patch. GOG-side changes from PR #595 were not pulled — Chris's fork's GOG login (multi-selector + API/cookie username fallback) is already more robust than the PR's addition.
+
+---
+
+## What's new in 2.12.7
+
+**Fix: Alerts-tab Dismiss on a Prime pending code sticks across the next GOG / Prime run.**
+
+Dismissing a pending Prime redemption from the Alerts tab writes `status: "dismissed"` to the entry. The panel's `PRIME_PENDING_TERMINAL_RX` correctly treats that as terminal, so the Alerts tab + HA sensors drop it immediately — but the per-script filters in `prime-gaming.js` and `gog.js` still used the narrow `/redeemed|expired|invalid/i`, so:
+
+- `gog.js` would re-probe the dismissed GOG code on its next run. If GOG's probe captcha-gated it again, `redeemAttempts` incremented and the entry eventually overwrote `dismissed` with `claimed, redeem retries exhausted` — surfacing a Pushover notification the user had explicitly dismissed.
+- `prime-gaming.js` would surface a dismissed non-GOG code (MS Store, Xbox, Legacy Games) in the daily pending-redeem Pushover. GOG dismissed codes slipped through only because the `isAutoRetryingGogCode` upstream filter happened to hide them.
+
+**Fix:** add `|dismissed` to the two `gog.js` regexes (`gog.js:574` library reconcile, `gog.js:629` probe filter) and the one `prime-gaming.js:290` pending-notify filter. User-intent dismiss is now terminal everywhere, matching the panel's shared superset. Updated the panel-side comment that incorrectly asserted `prime-gaming.js` filtered `dismissed` upstream (true for GOG via the auto-retry gate; false for MS Store / Xbox / Legacy).
+
+Hit live during @feldorn's DOOM/GOG dismiss — Alerts dropped the entry, but tomorrow's GOG run would have ignored the dismiss and probed anyway. One of the regex-drift traps the shared `PRIME_PENDING_TERMINAL_RX` constant was supposed to prevent (see `feedback_no_local_shadow_of_shared_helper`).
+
+---
+
+## What's new in 2.12.6
+
+**Fix: Prime Gaming claim locators are locale-proof ([#157](https://github.com/feldorn/free-games-claimer/issues/157) @h1nnak).**
+
+@h1nnak hit a 60s timeout on `a:has-text("Claim")` inside the FGWP (Free Games with Prime) external-offer card on a German Prime account. Amazon's Prime UI translates the "Claim" button label per locale (German sees "Anfordern" or similar), so the English-text locator never matched and the external redemption loop crashed before fetching the game slug.
+
+**Fix:** replace the English-only text match with the structural `data-a-target="FGWPOffer"` attribute that Amazon already uses to tag these elements for their own analytics — the parent card locator at `.item-card__action:has(…[data-a-target="FGWPOffer"])` was already relying on it, so swapping the inner selector is a strict improvement (same element, locale-independent). Applied to both the internal claim click and the external slug fetch:
+
+- `src/platforms/prime-gaming.js:484` — internal: `.tw-button:has-text("Claim")` → `button[data-a-target="FGWPOffer"]`
+- `src/platforms/prime-gaming.js:502` — external: `a:has-text("Claim")` → `a[data-a-target="FGWPOffer"]`
+
+**Scope note:** this clears the specific locator @h1nnak reported. Other English-only locators remain downstream (`"Collected"` already-claimed count, `"Get game"` / `"Complete Claim"` buy-box CTA, `"Success"` / `"You collected this"` success text, `"Get in-game content"` DLC path). Those haven't surfaced in a diagnostic report yet — happy to iterate if the next run on a non-English account hits one.
+---
 ## What's new in 2.12.5.4
 
 **Field-test fixes for the IKEA watcher (v2.12.5.3): one card instead of two, the browser speaks the page's language, and the country menu.**

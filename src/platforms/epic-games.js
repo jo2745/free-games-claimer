@@ -2,12 +2,13 @@ import { chromium } from 'patchright';
 import { authenticator } from 'otplib';
 import path from 'path';
 import { existsSync, writeFileSync } from 'fs';
-import { resolve, jsonDb, datetime, filenamify, prompt, confirm, notify, html_game_list, closeContextSafely, log } from '#src/util.js';
+import { resolve, jsonDb, datetime, filenamify, prompt, confirm, notify, html_game_list, closeContextSafely, log, isNetworkErrorMessage } from '#src/util.js';
 import { launchContext, gotoWithRetry } from '#src/browser.js';
 import { checkQualityGate, newQualityTally, recordQualityResult, formatQualityTally } from '#src/quality-lookup.js';
 import { cfg } from '#src/config.js';
 import { siteVersion } from '#src/sites.js';
 import { getMobileGames } from '#src/epic-games-mobile.js';
+import { checkEpicAccountSession, resumeEpicAccountSwitcher } from '#src/epic-session.js';
 import { fetchGamerPowerGiveaways, filterFor as filterGpFor, resolveGamerPowerHref, unhandledPlatforms as gpUnhandled } from '#src/gamerpower.js';
 import { fetchFGFPosts, filterFor as filterFgfFor, unhandledPlatforms as fgfUnhandled, cleanTitle as fgfClean } from '#src/freegamefindings.js';
 
@@ -46,6 +47,18 @@ const OWNED_TEXTS_GLOBAL = [
 // only — code-review flagged the drift. Now all callers get it uniformly.
 const isOwnedText = (t) => t && t !== 'loading' && OWNED_TEXTS_GLOBAL.some(w => t === w || t.startsWith(w));
 
+// 2026-10-15: Epic's eds_370 store redesign dropped
+// data-testid="purchase-cta-button". The CTA is now the first un-labelled
+// button in the product sidebar (Add to Cart / Wishlist carry aria-labels;
+// Share / Report come after it). The old testid stays first in the list in
+// case Epic restores it. Passed as an argument into waitForFunction calls,
+// which run in the browser context and can't see module scope.
+const CTA_SELECTOR = 'button[data-testid="purchase-cta-button"], section[class*="_sidebar_"] button:not([aria-label])';
+// Same redesign: #webPurchaseContainer is gone. The checkout is now
+// <iframe title="Checkout" src="https://store.epicgames.com/checkout?purchaseToken=…">
+// inside a section[role=dialog]; "Add to library" still lives in that iframe.
+const CHECKOUT_IFRAME = '#webPurchaseContainer iframe, iframe[src*="/checkout?purchaseToken="]';
+
 // v2.11.15 (2026-08-28 feldorn11906 run): Epic's post-successful-claim
 // modal "FINAL STEP — Is Epic Games Launcher installed?" (labels "No, get
 // launcher" / "Yes, it's installed") stays open when the next iteration's
@@ -59,7 +72,80 @@ const isOwnedText = (t) => t && t !== 'loading' && OWNED_TEXTS_GLOBAL.some(w => 
 // Zero cost when the modal isn't there (all locators short-circuit at
 // count() === 0). No error path — dismiss failure is silent by design;
 // the next goto's domcontentloaded wait will still succeed.
-const RX_LAUNCHER_MODAL_HEADING = /final\s*step|is\s*epic\s*games\s*launcher\s*installed|Letzter\s*Schritt|Ist\s*der\s*Epic\s*Games\s*Launcher/i;
+// Frame-agnostic hCaptcha probe. The legacy check only looked for
+// `#h_captcha_challenge_checkout_free_prod iframe` INSIDE the checkout
+// iframe, but Epic also serves a "One more step / Please complete a
+// security check" hCaptcha wall BEFORE the checkout iframe loads (seen
+// 2026-11-02 on Dark Mystery: no store page, no checkout iframe, just the
+// challenge). waitForSelector(CHECKOUT_IFRAME) then timed out with
+// `iframe` undefined, the captcha check was skipped, and the game logged a
+// plain failure — no solve-now push, no captcha retry. Walk every frame
+// instead: a visible, on-screen hCaptcha challenge frame or the wrapper's
+// "One more step" heading counts. Invisible pre-loaded hCaptcha frames are
+// parked off-screen/hidden, so the bounding-box check filters them out.
+const RX_CAPTCHA_WALL = /One more step|complete a security check/i;
+async function isCaptchaShowing(page, iframe) {
+  if (page.isClosed()) return false;
+  try {
+    if (iframe && await iframe.locator('#h_captcha_challenge_checkout_free_prod iframe').count().catch(() => 0) > 0) return true;
+    for (const f of page.frames()) {
+      if (/hcaptcha\.com/i.test(f.url()) && /frame=challenge/i.test(f.url())) {
+        const el = await f.frameElement().catch(() => null);
+        const box = el && await el.isVisible().catch(() => false) ? await el.boundingBox().catch(() => null) : null;
+        if (box && box.width > 50 && box.height > 50 && box.x > -1000 && box.y > -1000) return true;
+      }
+      if (await f.getByText(RX_CAPTCHA_WALL).first().isVisible().catch(() => false)) return true;
+    }
+  } catch { /* probe is best-effort */ }
+  return false;
+}
+
+// Once a captcha is on screen, a person has to see the push, open noVNC and
+// solve it — the 60s step timeout ran out before that was realistic, so a
+// solved captcha still ended as "failed to claim". `step(timeout)` is one
+// idempotent checkout step (wait for the iframe, click Add to library, the
+// success race). If it times out while a captcha was seen, it's re-run until
+// cfg.eg_captcha_wait has passed since the captcha appeared.
+const CAPTCHA_WAIT_MIN = Math.round(cfg.eg_captcha_wait / 60000);
+const isTimeoutError = e => e?.name === 'TimeoutError' || /Timeout \d+ms exceeded/i.test(String(e?.message || e));
+async function withCaptchaGrace(page, captchaAt, step) {
+  let t = cfg.timeout, announced = false;
+  for (;;) {
+    try {
+      return await step(t);
+    } catch (e) {
+      const since = captchaAt();
+      const left = since ? since + cfg.eg_captcha_wait - Date.now() : 0;
+      if (left < 1000 || page.isClosed() || !isTimeoutError(e)) throw e;
+      if (!announced) {
+        log.info(`Waiting up to ${Math.ceil(left / 1000)}s more for the captcha to be solved`);
+        announced = true;
+      }
+      t = Math.min(cfg.timeout, left);
+    }
+  }
+}
+
+// Three success signals, whichever fires first (see the comment at the main
+// claim's call site for why each exists). Shared by the main and retry path.
+function claimSuccessRace(page, timeout) {
+  return Promise.race([
+    page.getByText(RX_ORDER_SUCCESS).first().waitFor({ state: 'attached', timeout }),
+    page.locator('button').filter({ hasText: new RegExp(RX_CONTINUE_BROWSING.source + '|' + RX_DOWNLOAD_LAUNCHER.source, 'i') }).first().waitFor({ state: 'visible', timeout }),
+    // Same owned-text semantics as the shared isOwnedText predicate,
+    // inlined here because waitForFunction runs in the browser context
+    // where the helper isn't reachable. Kept in sync via OWNED_TEXTS_GLOBAL.
+    page.waitForFunction(({ sel, ownedList }) => {
+      const btn = document.querySelector(sel);
+      if (!btn) return false;
+      const txt = (btn.innerText || '').trim().toLowerCase();
+      if (!txt || txt === 'loading') return false;
+      return ownedList.some(t => txt === t || txt.startsWith(t));
+    }, { sel: CTA_SELECTOR, ownedList: OWNED_TEXTS_GLOBAL }, { timeout }),
+  ]);
+}
+
+const RX_LAUNCHER_MODAL_HEADING =/final\s*step|is\s*epic\s*games\s*launcher\s*installed|Letzter\s*Schritt|Ist\s*der\s*Epic\s*Games\s*Launcher/i;
 async function dismissLauncherModal(page) {
   if (page.isClosed()) return;
   try {
@@ -96,8 +182,11 @@ async function dismissLauncherModal(page) {
 log.section(`Epic Games (v${siteVersion('epic-games')})`);
 
 const offerIdMap = {};
+// null = promotions API unavailable (fall back to the full page wait below);
+// otherwise the page slugs of this week's 100%-off games per the API.
+let apiFreeSlugs = null;
 try {
-  const res = await fetch(URL_PROMOTIONS);
+  const res = await fetch(URL_PROMOTIONS, { signal: AbortSignal.timeout(15000) }); // never let a hung API stall startup
   const data = await res.json();
   for (const el of data?.data?.Catalog?.searchStore?.elements || []) {
     const promos = el.promotions?.promotionalOffers?.[0]?.promotionalOffers || [];
@@ -106,6 +195,7 @@ try {
     const slug = el.catalogNs?.mappings?.[0]?.pageSlug || el.urlSlug;
     if (slug) offerIdMap[decodeURIComponent(slug).toLowerCase()] = el.id;
   }
+  apiFreeSlugs = Object.keys(offerIdMap);
   if (Object.keys(offerIdMap).length) {
     log.status('Offer IDs fetched', Object.keys(offerIdMap).length);
   }
@@ -185,13 +275,17 @@ const isRecoverableEpicPageError = (err) => {
       // most cases, but this stays as belt-and-braces for weirder shapes.
       || /page\.goto:? Timeout \d+ms exceeded/i.test(msg)
       || /Timeout \d+ms exceeded.*navigating to/i.test(msg)
-      || /ERR_ADDRESS_UNREACHABLE|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ERR_NETWORK_CHANGED|ERR_CONNECTION_RESET|ERR_TIMED_OUT/i.test(msg);
+      || isNetworkErrorMessage(msg);
 };
 
 // Critical-path gotos only (URL_CLAIM at run start, URL_LOGIN in the sign-in
 // flow): one 30s-delayed retry on the transient family above, everything else
 // throws at once so real bugs aren't masked. Per-game gotos in the claim loop
 // stay retry-free — one bad game shouldn't cost 30s of the batch. (#104, #105)
+// Side watchers (EULA, parental PIN, 'I Agree', captcha) are started per game
+// without awaiting. With the default 60s timeout they outlived their game and
+// could fire on the NEXT game's page; bound them to roughly one claim attempt.
+const SIDE_WAIT = { timeout: 30000 };
 const EPIC_NAV = { attempts: 2, backoffMs: 30000, isRecoverable: isRecoverableEpicPageError, siteId: 'epic-games' };
 
 try {
@@ -209,8 +303,39 @@ try {
   // page.click('button:has-text("Accept All Cookies")').catch(_ => { }); // Not needed anymore since we set the cookie above. Clicking this did not always work since the message was animated in too slowly.
   page.locator('button:has-text("Continue")').click().catch(_ => { }); // already logged in, but need to accept updated "Epic Games Privacy Policy"
 
-  while (await page.locator('egs-navigation').getAttribute('isloggedin') != 'true') {
-    log.warn('Not signed in');
+  // The store header alone isn't proof: its refresh token outlives the
+  // account session that Get/checkout needs, so a profile can look signed
+  // in and still bounce every claim to /id/login. checkEpicAccountSession
+  // asks Epic whether it still accepts the session (#163).
+  const signedIn = async () => {
+    if (await page.locator('egs-navigation').getAttribute('isloggedin') != 'true') {
+      log.warn('Not signed in');
+      return false;
+    }
+    const acct = await checkEpicAccountSession(context);
+    if (acct.probe === 'unknown') log.info(`Couldn't confirm the Epic account session with Epic (${acct.error || `HTTP ${acct.status}`}) — going by cookies`);
+    if (!acct.ok) {
+      log.warn(`Not signed in — ${acct.reason}`);
+      return false;
+    }
+    if (acct.warning) log.warn(acct.warning);
+    return true;
+  };
+  // A lapsed session on a known device lands on Epic's account switcher;
+  // one click on the account signs back in, no credentials needed (#163).
+  // Tried once before the NOWAIT exit so scheduled runs can recover too.
+  let triedSwitcher = false;
+  while (!await signedIn()) {
+    if (!triedSwitcher) {
+      triedSwitcher = true;
+      await gotoWithRetry(page, URL_LOGIN, EPIC_NAV);
+      if (await resumeEpicAccountSwitcher(page, cfg.eg_email)) {
+        log.info('Epic showed the account switcher — clicked the remembered account');
+        await page.waitForURL(URL_CLAIM, { timeout: 30000 }).catch(_ => { });
+      }
+      await gotoWithRetry(page, URL_CLAIM, EPIC_NAV);
+      continue;
+    }
     if (cfg.nowait) process.exit(1);
     if (cfg.novnc_port) log.info(`Open http://localhost:${cfg.novnc_port} to login inside the docker container`);
     if (!cfg.debug) context.setDefaultTimeout(cfg.login_timeout); // give user some extra time to log in
@@ -283,19 +408,38 @@ try {
 
   // Detect free games
   const game_loc = page.locator('a:has(span:text-is("Free Now"))');
-  await game_loc.last().waitFor().catch(_ => {
-    // rarely there are no free games available -> catch Timeout
-    // TODO would be better to wait for alternative like 'coming soon' instead of waiting for timeout
-    // see https://github.com/vogler/free-games-claimer/issues/210#issuecomment-1727420943
-    log.warn('No free games available in your region');
-    // urls below should then be an empty list
-  });
+  // v2.12.26: the "Free Now" tiles normally render within a few seconds.
+  // When the promotions API answered we already know this week's free
+  // games, so cap the wait at 15s instead of the full cfg.timeout (60s) —
+  // since 2026-10-30 the tile selector stopped matching while the API still
+  // listed the week's game (Sorry We're Closed), costing 60s every run.
+  // Full wait only when the API was unreachable and the page is all we have.
+  const freeNowTimeout = apiFreeSlugs ? Math.min(15000, cfg.timeout) : cfg.timeout;
+  // v2.12.27: wait for the tile to be ATTACHED, not visible. Since ~10-30
+  // `.last().waitFor()` (default state: visible) times out even though the
+  // single tile is present and isVisible() is true (probed 2026-11-02 in the
+  // live container: attached-wait 33ms, visible-wait timeout) — so every run
+  // logged "No free games available in your region" while `.all()` below
+  // still picked the game up.
+  await game_loc.first().waitFor({ state: 'attached', timeout: freeNowTimeout }).catch(_ => { });
   // clicking on `game_sel` sometimes led to a 404, see https://github.com/vogler/free-games-claimer/issues/25
   // debug showed that in those cases the href was still correct, so we `goto` the urls instead of clicking.
   // Alternative: parse the json loaded to build the page https://store-site-backend-static-ipv4.ak.epicgames.com/freeGamesPromotions
   // i.e. filter data.Catalog.searchStore.elements for .promotions.promotionalOffers being set and build URL with .catalogNs.mappings[0].pageSlug or .urlSlug if not set to some wrong id like it was the case for spirit-of-the-north-f58a66 - this is also what's done here: https://github.com/claabs/epicgames-freegames-node/blob/938a9653ffd08b8284ea32cf01ac8727d25c5d4c/src/puppet/free-games.ts#L138-L213
   const urlSlugs = await Promise.all((await game_loc.all()).map(a => a.getAttribute('href')));
   const urls = urlSlugs.map(s => 'https://store.epicgames.com' + s);
+  // Add the API's free games the page didn't show (tile selector drift).
+  // Compare on the last path segment, the same id the claim DB uses.
+  const pageSlugs = new Set(urls.map(u => u.split('/').pop().split('?')[0].toLowerCase()));
+  const apiOnly = (apiFreeSlugs || []).filter(sl => !pageSlugs.has(sl.split('/').pop()));
+  for (const sl of apiOnly) urls.push(`https://store.epicgames.com/en-US/p/${sl}`);
+  // Message from what was actually collected, not from whether the wait
+  // timed out (a timed-out wait doesn't mean the tiles are absent).
+  if (!urlSlugs.length) {
+    if (apiOnly.length) log.info(`"Free Now" tiles not found on the page — using ${apiOnly.length} free game(s) from Epic's promotions API`);
+    // rarely there are no free games available, see https://github.com/vogler/free-games-claimer/issues/210#issuecomment-1727420943
+    else log.warn('No free games available in your region');
+  }
 
   // Free mobile games - https://github.com/vogler/free-games-claimer/issues/474
   // https://egs-platform-service.store.epicgames.com/api/v2/public/discover/home?count=10&country=DE&locale=en&platform=android&start=0&store=EGS
@@ -328,7 +472,11 @@ try {
           // Some resolved hrefs land on a region-locale subpath
           // (e.g. /en-US/p/) — Epic redirects between locales freely, so
           // we don't normalise.
-          if (!urls.includes(resolved)) {
+          // Compare on slug, not full URL: GamerPower often appends
+          // ?lang=en-US or a locale path to the same game the page/API
+          // already listed, which cost a duplicate page visit.
+          const rSlug = resolved.split('/').pop().split('?')[0].toLowerCase();
+          if (!urls.some(u => u.split('/').pop().split('?')[0].toLowerCase() === rSlug)) {
             log.info(`GamerPower → ${entry.title}: ${resolved}`);
             urls.push(resolved);
           }
@@ -426,6 +574,10 @@ try {
   // 2026-05-14: 6 URLs in, 5 logged, 1 silently deduped — looked like
   // a missing game).
   let dedupedVariants = 0;
+  // v2.12.12 (#162): set when a failed claim lands on Epic's login page —
+  // the session died between the startup login check and the product
+  // page. Remaining games would each burn a 60s timeout the same way.
+  let sessionLost = false;
 
   for (const url of urls) {
     if (cfg.time) console.time('claim game');
@@ -509,13 +661,25 @@ try {
     // timeout on game #4 of 4 broke the whole Epic pass. URL is
     // logged on failure so the next diagnostics submission identifies
     // which page caused it without needing a debug rerun.
+    const ctaReady = () => page.waitForFunction(
+      (sel) => {
+        const btn = document.querySelector(sel);
+        return btn && /[ei]/i.test(btn.textContent) && btn.textContent != 'Loading';
+      },
+      CTA_SELECTOR,
+      { timeout: 30000 },
+    );
     try {
-      await page.waitForFunction(
-        () => {
-          const btn = document.querySelector('button[data-testid="purchase-cta-button"]');
-          return btn && /[ei]/i.test(btn.textContent) && btn.textContent != 'Loading';
-        }
-      );
+      try {
+        await ctaReady();
+      } catch {
+        // A product page that didn't hydrate in 30s rarely does at 60s, but
+        // a fresh load usually renders within a few seconds.
+        log.info(`CTA not ready after 30s for ${url} — reloading once`);
+        await dismissLauncherModal(page);
+        await page.reload({ waitUntil: 'commit' });
+        await ctaReady();
+      }
     } catch (e) {
       log.fail(`CTA button never loaded for ${url} (${e.message?.split('\n')[0] || e}) — skipping this game`);
       notify_games.push({ title: skipId, url, status: 'failed: CTA never loaded' });
@@ -530,7 +694,7 @@ try {
     // networkidle is best-effort capped at 5s — strictness loses races,
     // we'd rather under-wait than block a healthy page.
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => { });
-    const purchaseBtn = page.locator('button[data-testid="purchase-cta-button"]').first();
+    const purchaseBtn = page.locator(CTA_SELECTOR).first();
     const btnText = (await purchaseBtn.innerText()).toLowerCase(); // barrier to block until page is loaded
     // v2.11.2: locale-portable already-owned detection. Steggl's #141 —
     // German UI renders "In der Bibliothek" instead of "In library", so
@@ -550,7 +714,8 @@ try {
     const isOwnedByButton = btnTextIndicatesOwned || btnDisabled;
 
     // click Continue if 'This game contains mature content recommended only for ages 18+'
-    if (await page.locator('button:has-text("Continue")').count() > 0) {
+    const continueBtn = page.locator('button:has-text("Continue")').first();
+    if (await continueBtn.count() > 0) {
       if (cfg.debug) console.log('  This game contains mature content recommended only for ages 18+');
       if (await page.locator('[data-testid="AgeSelect"]').count()) {
         log.warn('Got unexpected age gate — please report to https://github.com/vogler/free-games-claimer/issues/275');
@@ -561,14 +726,31 @@ try {
         await page.locator('#year_toggle').click();
         await page.locator('#year_menu li:has-text("1987")').click();
       }
-      await page.click('button:has-text("Continue")', { delay: 111 });
-      await page.waitForTimeout(2000);
+      // #180: Epic can show a gate whose Continue button stays disabled
+      // (likely a redesigned date-of-birth prompt we don't fill). The old
+      // unbounded click waited 60s and threw out of the loop, killing the
+      // whole Epic run on the same game every day. Bounded click; on
+      // failure, screenshot + mark this game failed and move on.
+      try {
+        await continueBtn.click({ delay: 111, timeout: 15000 });
+        await page.waitForTimeout(2000);
+      } catch (e) {
+        if (page.isClosed()) throw e;
+        const gateTitle = await page.locator('h1').first().innerText({ timeout: 3000 }).catch(() => skipId);
+        const p = screenshot('failed', `${skipId}_gate_${filenamify(datetime())}.png`);
+        await page.screenshot({ path: p, fullPage: false }).catch(() => { });
+        const disabled = await continueBtn.isDisabled().catch(() => false);
+        log.fail(`${gateTitle} — Epic's "Continue" gate ${disabled ? 'stayed disabled' : 'could not be clicked'} — skipping this game (screenshot: ${p})`);
+        notify_games.push({ title: gateTitle, url, status: 'failed: blocked by Epic age/content gate' });
+        if (cfg.time) console.timeEnd('claim game');
+        continue;
+      }
     }
 
     let title;
     let bundle_includes;
     if (await page.locator('span:text-is("About Bundle")').count()) {
-      title = (await page.locator('span:has-text("Buy"):left-of([data-testid="purchase-cta-button"])').first().innerText()).replace('Buy ', '');
+      title = (await page.locator(`span:has-text("Buy"):left-of(${CTA_SELECTOR})`).first().innerText()).replace('Buy ', '');
       // h1 first didn't exist for bundles but now it does... However h1 would e.g. be 'Fallout® Classic Collection' instead of 'Fallout Classic Collection'
       try {
         bundle_includes = await Promise.all((await page.locator('.product-card-top-row h5').all()).map(b => b.innerText()));
@@ -649,19 +831,47 @@ try {
         }
       }
       log.game(title, `claiming (${btnText})`);
-      let captchaDetected = false;
+      let captchaDetected = false, captchaAt = null;
+      // One handler for every captcha signal (checkout-iframe watcher below
+      // + the frame-agnostic poll) so the warn/push fires once per game.
+      const onCaptcha = async () => {
+        if (captchaDetected) return;
+        captchaDetected = true;
+        captchaAt = Date.now();
+        log.warn(`Got hCaptcha challenge — solve it in the browser within ${CAPTCHA_WAIT_MIN} min, or get a new IP address`);
+        // Include the panel deep-link (?focus=captcha auto-opens the
+        // browser view on the active service) so tapping the push
+        // takes the user straight to where they need to be. Game link
+        // kept as a secondary line for context. Priority is configurable
+        // via Settings → Notifications → Captcha priority (default
+        // high so it punches through DnD — captchas have minutes
+        // before the iframe times out).
+        const panelLink = cfg.public_url ? `${cfg.public_url}/?focus=captcha` : '';
+        const body = `epic-games: got captcha challenge for ${title} — solve within ${CAPTCHA_WAIT_MIN} min${panelLink ? '<br>' + panelLink : ''}<br>Game: ${url}`;
+        await notify(body, { priority: cfg.captcha_notify_priority || 'high', kind: 'action' });
+      };
+      let claimSettled = false;
       await purchaseBtn.click({ delay: 11 }); // got stuck here without delay (or mouse move), see #75, 1ms was also enough
+      // Poll for the pre-checkout "One more step" wall, which never shows up
+      // inside the checkout iframe (see isCaptchaShowing). Stops once this
+      // game's claim attempt settles either way.
+      (async () => {
+        while (!claimSettled && !captchaDetected && !page.isClosed()) {
+          if (await isCaptchaShowing(page)) { await onCaptcha().catch(() => { }); break; }
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      })().catch(() => { });
 
       // click Continue if 'Device not supported. This product is not compatible with your current device.' - avoided by Windows userAgent?
-      page.locator('button').filter({ hasText: RX_CONTINUE }).first().click().catch(_ => { });
+      page.locator('button').filter({ hasText: RX_CONTINUE }).first().click({ timeout: 10000 }).catch(_ => { });
 
       // click 'Yes, buy now' if 'This edition contains something you already have. Still interested?'
-      page.locator('button').filter({ hasText: RX_YES_BUY_NOW }).first().click().catch(_ => { });
+      page.locator('button').filter({ hasText: RX_YES_BUY_NOW }).first().click({ timeout: 10000 }).catch(_ => { });
 
       // Accept End User License Agreement (only needed once). EULA phrasing
       // varies per locale, so match on the regex above rather than a
       // literal English string.
-      page.getByText(RX_EULA).first().waitFor().then(async () => {
+      page.getByText(RX_EULA).first().waitFor(SIDE_WAIT).then(async () => {
         log.info('Accepting End User License Agreement');
         if (cfg.debug) console.log(page.innerHTML);
         if (cfg.debug) console.log('Please report the HTML above here: https://github.com/vogler/free-games-claimer/issues/371');
@@ -679,8 +889,10 @@ try {
       let iframe;
       try {
         // it then creates an iframe for the purchase
-        await page.waitForSelector('#webPurchaseContainer iframe'); // TODO needed?
-        iframe = page.frameLocator('#webPurchaseContainer iframe');
+        // Captcha grace (withCaptchaGrace): the pre-checkout "One more step"
+        // wall holds this wait until it's solved.
+        await withCaptchaGrace(page, () => captchaAt, t => page.waitForSelector(CHECKOUT_IFRAME, { timeout: t }));
+        iframe = page.frameLocator(CHECKOUT_IFRAME).first();
         // skip game if unavailable in region, https://github.com/vogler/free-games-claimer/issues/46 TODO check games for account's region
         if (await iframe.locator(':has-text("unavailable in your region")').count() > 0) {
           log.skip(title, 'unavailable in your region');
@@ -690,7 +902,7 @@ try {
           continue;
         }
 
-        iframe.locator('.payment-pin-code').waitFor().then(async () => {
+        iframe.locator('.payment-pin-code').waitFor(SIDE_WAIT).then(async () => {
           if (!cfg.eg_parentalpin) {
             log.warn('EG_PARENTALPIN not set — enter Parental Control PIN manually');
             notify('epic-games: EG_PARENTALPIN not set. Need to enter Parental Control PIN manually.');
@@ -720,28 +932,15 @@ try {
         // Locale variants added for Steggl's #141 followup — German
         // (Zur Bibliothek hinzufügen / Bestellung abschließen / Jetzt kaufen).
         // Extend RX_ADD_LIBRARY at the top of this block for other locales.
-        await iframe.locator('button').filter({ hasText: RX_ADD_LIBRARY }).filter({ hasNot: iframe.locator('.payment-loading--loading') }).first().click({ delay: 11 });
+        await withCaptchaGrace(page, () => captchaAt, t => iframe.locator('button').filter({ hasText: RX_ADD_LIBRARY }).filter({ hasNot: iframe.locator('.payment-loading--loading') }).first().click({ delay: 11, timeout: t }));
 
         // I Agree button is only shown for EU accounts! https://github.com/vogler/free-games-claimer/pull/7#issuecomment-1038964872
         const btnAgree = iframe.locator('button').filter({ hasText: RX_ACCEPT });
-        btnAgree.waitFor().then(() => btnAgree.first().click()).catch(_ => { }); // EU: wait for and click 'I Agree'
+        btnAgree.waitFor(SIDE_WAIT).then(() => btnAgree.first().click({ timeout: 5000 })).catch(_ => { }); // EU: wait for and click 'I Agree'
         // context.setDefaultTimeout(100 * 1000); // give time to solve captcha, iframe goes blank after 60s?
         const captcha = iframe.locator('#h_captcha_challenge_checkout_free_prod iframe');
-        captcha.waitFor().then(async () => { // don't await, since element may not be shown
-          captchaDetected = true;
-          log.warn('Got hCaptcha challenge — solve in browser or get a new IP address');
-          // Include the panel deep-link (?focus=captcha auto-opens the
-          // browser view on the active service) so tapping the push
-          // takes the user straight to where they need to be. Game link
-          // kept as a secondary line for context. Priority is configurable
-          // via Settings → Notifications → Captcha priority (default
-          // high so it punches through DnD — captchas have minutes
-          // before the iframe times out).
-          const panelLink = cfg.public_url ? `${cfg.public_url}/?focus=captcha` : '';
-          const body = `epic-games: got captcha challenge for ${title} — solve now${panelLink ? '<br>' + panelLink : ''}<br>Game: ${url}`;
-          await notify(body, { priority: cfg.captcha_notify_priority || 'high', kind: 'action' });
-        }).catch(_ => { }); // may time out if not shown
-        iframe.locator('.payment__errors:has-text("Failed to challenge captcha, please try again later.")').waitFor().then(async () => {
+        captcha.waitFor(SIDE_WAIT).then(onCaptcha).catch(_ => { }); // don't await, since element may not be shown; may time out if not shown
+        iframe.locator('.payment__errors:has-text("Failed to challenge captcha, please try again later.")').waitFor(SIDE_WAIT).then(async () => {
           log.fail('Failed captcha challenge — try again later');
           const panelLink = cfg.public_url ? `${cfg.public_url}/?focus=captcha` : '';
           const body = `epic-games: failed captcha challenge for ${title}${panelLink ? '<br>' + panelLink : ''}<br>Game: ${url}`;
@@ -770,20 +969,7 @@ try {
         // Success signal is now text-only via the locale-portable regexes:
         // modal-copy match OR CTA text transitioning to a known "owned"
         // string. Both are only true AFTER Epic confirms the purchase.
-        await Promise.race([
-          page.getByText(RX_ORDER_SUCCESS).first().waitFor({ state: 'attached' }),
-          page.locator('button').filter({ hasText: new RegExp(RX_CONTINUE_BROWSING.source + '|' + RX_DOWNLOAD_LAUNCHER.source, 'i') }).first().waitFor({ state: 'visible' }),
-          // Same owned-text semantics as the shared isOwnedText predicate,
-          // inlined here because waitForFunction runs in the browser context
-          // where the helper isn't reachable. Kept in sync via OWNED_TEXTS_GLOBAL.
-          page.waitForFunction((ownedList) => {
-            const btn = document.querySelector('button[data-testid="purchase-cta-button"]');
-            if (!btn) return false;
-            const txt = (btn.innerText || '').trim().toLowerCase();
-            if (!txt || txt === 'loading') return false;
-            return ownedList.some(t => txt === t || txt.startsWith(t));
-          }, { timeout: cfg.timeout }, OWNED_TEXTS_GLOBAL),
-        ]);
+        await withCaptchaGrace(page, () => captchaAt, t => claimSuccessRace(page, t));
         db.data[user][game_id].status = 'claimed';
         db.data[user][game_id].time = datetime(); // claimed time overwrites failed/dryrun time
         log.ok(`${title} — claimed!`);
@@ -806,7 +992,7 @@ try {
         // 2026-05-14 on Arranger).
         let recoveredViaCta = false;
         try {
-          const ctaLoc = page.locator('button[data-testid="purchase-cta-button"]').first();
+          const ctaLoc = page.locator(CTA_SELECTOR).first();
           // v2.11.5: stability check for the recovery-probe. v2.11.4 could
           // false-positive on a transient owned-flash during Epic's failed-
           // transaction rollback (German UI shows "In der Bibliothek" briefly).
@@ -847,11 +1033,21 @@ try {
             log.warn(`page.screenshot failed for ${title} (${String(e.message || e).split('\n')[0]}) — skipping capture`);
           }
           db.data[user][game_id].status = 'failed';
-          if (iframe && (captchaDetected || await iframe.locator('#h_captcha_challenge_checkout_free_prod iframe').count().catch(() => 0) > 0)) {
+          if (/epicgames\.com\/id\/login/.test(page.url())
+            || await page.locator('egs-navigation').getAttribute('isloggedin', { timeout: 3000 }).catch(() => null) === 'false') {
+            sessionLost = true;
+            log.warn('Epic session lost mid-run — the claim redirected to the login page');
+          }
+          // No `iframe &&` guard: the pre-checkout captcha wall leaves
+          // iframe undefined (CHECKOUT_IFRAME never appeared), which is
+          // exactly the case that used to fall through as a plain failure.
+          if (captchaDetected || await isCaptchaShowing(page, iframe)) {
             captchaDetected = true;
             notify_game.captcha = true;
           }
         }
+      } finally {
+        claimSettled = true; // stop the captcha poll on every exit path (incl. region/dryrun `continue`s)
       }
       notify_game.status = db.data[user][game_id].status; // claimed or failed
       if (notify_game.status === 'failed') {
@@ -861,6 +1057,8 @@ try {
           notify_game.details = `<a href="${url}">View game</a>`;
         }
       }
+
+      if (sessionLost) break;
 
       const p = screenshot(`${game_id}.png`);
       if (!existsSync(p)) {
@@ -881,50 +1079,76 @@ try {
   }
 
   const captchaRetries = notify_games.filter(g => g.captcha && g.status === 'failed');
-  if (captchaRetries.length) {
+  if (captchaRetries.length && !sessionLost) {
     log.info(`Retrying ${captchaRetries.length} captcha-failed game(s) in 60s...`);
     await page.waitForTimeout(60000);
     for (const retry of captchaRetries) {
       log.info(`Retrying ${retry.title}...`);
+      let retrySettled = true, retryCaptcha = false, retryCaptchaAt = null;
       try {
-        await page.goto(retry.url, { waitUntil: 'domcontentloaded' });
+        await page.goto(retry.url, { waitUntil: 'commit' }); // same reasoning as the main loop (#151)
         await page.waitForFunction(
-          () => {
-            const btn = document.querySelector('button[data-testid="purchase-cta-button"]');
+          (sel) => {
+            const btn = document.querySelector(sel);
             return btn && /[ei]/i.test(btn.textContent) && btn.textContent != 'Loading';
-          }
+          },
+          CTA_SELECTOR,
+          { timeout: 30000 },
         );
-        const purchaseBtn = page.locator('button[data-testid="purchase-cta-button"]').first();
+        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => { }); // ownership settle, as in the main loop
+        const purchaseBtn = page.locator(CTA_SELECTOR).first();
         const btnText = (await purchaseBtn.innerText()).toLowerCase();
-        if (btnText === 'in library') {
+        // Locale-portable (was English-only 'in library' / 'get', so every
+        // retry on a German UI ended as "unexpected button").
+        const retryOwned = isOwnedText(btnText) || await purchaseBtn.isDisabled().catch(() => false);
+        if (retryOwned) {
           log.ok(`${retry.title} — claimed (already in library after retry)`);
           retry.status = 'claimed';
           retry.details = '';
           retry.captcha = false;
           const game_id = page.url().split('/').pop();
+          db.data[user][game_id] ||= { title: retry.title, time: datetime(), url: retry.url };
           db.data[user][game_id].status = 'claimed';
           continue;
         }
-        if (btnText !== 'get') {
-          log.fail(`${retry.title} — unexpected button: ${btnText}`);
+        if (btnText === 'requires base game') {
+          log.fail(`${retry.title} — requires base game — not retried`);
           retry.status = 'failed';
           retry.details = `Retry also failed. Game: ${retry.url}`;
           continue;
         }
         log.game(retry.title, 'claiming (retry)');
         await purchaseBtn.click({ delay: 11 });
-        page.click('button:has-text("Continue")').catch(_ => { });
-        page.click('button:has-text("Yes, buy now")').catch(_ => { });
-        await page.waitForSelector('#webPurchaseContainer iframe');
-        const iframe = page.frameLocator('#webPurchaseContainer iframe');
-        const btnAgree = iframe.locator('button:has-text("I Accept")');
-        btnAgree.waitFor().then(() => btnAgree.click()).catch(_ => { });
+        // Same frame-agnostic captcha poll as the main path, so a second
+        // captcha on the retry still pushes a solve-now (the retry used to
+        // just burn cfg.timeout silently). Stops when this retry settles.
+        retrySettled = false;
+        (async () => {
+          while (!retrySettled && !page.isClosed()) {
+            if (await isCaptchaShowing(page)) {
+              retryCaptcha = true;
+              retryCaptchaAt = Date.now();
+              log.warn(`Got hCaptcha challenge on retry of ${retry.title} — solve it in the browser within ${CAPTCHA_WAIT_MIN} min`);
+              const panelLink = cfg.public_url ? `${cfg.public_url}/?focus=captcha` : '';
+              await notify(`epic-games: got captcha challenge on retry for ${retry.title} — solve within ${CAPTCHA_WAIT_MIN} min${panelLink ? '<br>' + panelLink : ''}<br>Game: ${retry.url}`, { priority: cfg.captcha_notify_priority || 'high', kind: 'action' }).catch(() => { });
+              break;
+            }
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        })().catch(() => { });
+        page.locator('button').filter({ hasText: RX_CONTINUE }).first().click({ timeout: 10000 }).catch(_ => { });
+        page.locator('button').filter({ hasText: RX_YES_BUY_NOW }).first().click({ timeout: 10000 }).catch(_ => { });
+        await withCaptchaGrace(page, () => retryCaptchaAt, t => page.waitForSelector(CHECKOUT_IFRAME, { timeout: t }));
+        const iframe = page.frameLocator(CHECKOUT_IFRAME).first();
+        const btnAgree = iframe.locator('button').filter({ hasText: RX_ACCEPT });
+        btnAgree.waitFor(SIDE_WAIT).then(() => btnAgree.first().click({ timeout: 5000 })).catch(_ => { });
         // Epic relabeled the confirm button from "Place Order" → "Add to
         // library" around 2026-05-28 (reported by @amphoterism on #59) —
         // every claim silently timed out because the old selector no
         // longer matched. Accept either text so we stay resilient if Epic
         // flips back or surfaces "Place Order" in some regions/flows.
-        await iframe.locator('button:has-text("Add to library"):not(:has(.payment-loading--loading)), button:has-text("Place Order"):not(:has(.payment-loading--loading))').first().click({ delay: 11 });
+        // Same locale-portable matcher as the main path (#141).
+        await withCaptchaGrace(page, () => retryCaptchaAt, t => iframe.locator('button').filter({ hasText: RX_ADD_LIBRARY }).filter({ hasNot: iframe.locator('.payment-loading--loading') }).first().click({ delay: 11, timeout: t }));
         // Same three-signal race as the main claim path above — see the
         // fuller comment there. Modal-text + popup-buttons + CTA-flip,
         // whichever fires first wins.
@@ -941,21 +1165,9 @@ try {
         // Success signal is now text-only via the locale-portable regexes:
         // modal-copy match OR CTA text transitioning to a known "owned"
         // string. Both are only true AFTER Epic confirms the purchase.
-        await Promise.race([
-          page.getByText(RX_ORDER_SUCCESS).first().waitFor({ state: 'attached' }),
-          page.locator('button').filter({ hasText: new RegExp(RX_CONTINUE_BROWSING.source + '|' + RX_DOWNLOAD_LAUNCHER.source, 'i') }).first().waitFor({ state: 'visible' }),
-          // Same owned-text semantics as the shared isOwnedText predicate,
-          // inlined here because waitForFunction runs in the browser context
-          // where the helper isn't reachable. Kept in sync via OWNED_TEXTS_GLOBAL.
-          page.waitForFunction((ownedList) => {
-            const btn = document.querySelector('button[data-testid="purchase-cta-button"]');
-            if (!btn) return false;
-            const txt = (btn.innerText || '').trim().toLowerCase();
-            if (!txt || txt === 'loading') return false;
-            return ownedList.some(t => txt === t || txt.startsWith(t));
-          }, { timeout: cfg.timeout }, OWNED_TEXTS_GLOBAL),
-        ]);
+        await withCaptchaGrace(page, () => retryCaptchaAt, t => claimSuccessRace(page, t));
         const game_id = page.url().split('/').pop();
+        db.data[user][game_id] ||= { title: retry.title, url: retry.url };
         db.data[user][game_id].status = 'claimed';
         db.data[user][game_id].time = datetime();
         log.ok(`${retry.title} — claimed on retry!`);
@@ -965,9 +1177,13 @@ try {
         // v2.11.15: same launcher-modal dismiss as the main success path.
         await dismissLauncherModal(page);
       } catch (e) {
-        log.fail(`${retry.title} — retry failed`);
+        log.fail(`${retry.title} — retry failed${retryCaptcha ? ' (captcha again — will retry next run)' : ''}`);
         if (cfg.debug) console.error(e);
-        retry.details = `Retry also failed. Game: ${retry.url}`;
+        retry.details = retryCaptcha
+          ? `Captcha blocked the retry too — will try again next run. Game: ${retry.url}`
+          : `Retry also failed. Game: ${retry.url}`;
+      } finally {
+        retrySettled = true;
       }
     }
   }
@@ -997,6 +1213,12 @@ try {
     } else {
       log.warn(`Cart fallback — 0/${failedGames.length} failed game(s) matched to offer IDs`);
     }
+  }
+  // Not an `ok` run: throwing here skips the success marker (so the panel
+  // doesn't count it as a clean run) and surfaces one clear error +
+  // notification instead of a generic per-game "failed to claim".
+  if (sessionLost) {
+    throw new Error(`Epic session lost mid-run — re-login via the panel's Sessions tab${cfg.novnc_port ? ' or noVNC' : ''} (log out and back in if Check still shows logged in)`);
   }
   // Epic returns each free game twice (PC + Mobile platform variants) and
   // notify_games has one entry per variant. Dedupe by title so the summary

@@ -29,7 +29,7 @@ Services are grouped by what they actually do.
 | Service | Notes |
 |---|---|
 | 🎯 [Microsoft Rewards](https://rewards.bing.com) | Daily Bing searches + activity cards for points, with before/after balance tracking |
-| 🛒 [AliExpress](https://m.aliexpress.com) | Daily check-in coins *(opt-in; disabled by default; **deprecated** — see [Bot detection](docs/REFERENCE.md#bot-detection--what-works-what-doesnt))* |
+| 🛒 [AliExpress](https://m.aliexpress.com) | Daily check-in coins, optional browse missions and quiz *(opt-in; disabled by default; **deprecated** — see [Bot detection](docs/REFERENCE.md#bot-detection--what-works-what-doesnt))* |
 | 🌐 **Custom websites** *(v2.12.5.1+, per-site profiles v2.12.5.2+)* | Visit any user-defined URLs on every run — for sites that award points/coins just for a daily logged-in visit (Temu, Lenovo, …). Each URL you add becomes its own Sessions-tab row with its **own isolated browser profile** (its own cookie jar), so a captcha, block, or stale login on one site can't affect the others. Add URLs in Settings → Services → Custom websites, or via the `CUSTOM_URLS` env var; log in to each site once via its row. *(opt-in; default off)* |
 
 **Watchers** — notify-only; surface new free items so you can grab them yourself:

@@ -36,6 +36,9 @@ The panel exposes a single REST endpoint (`/api/hass/sensors`) that returns a fl
   "active_services": ["epic-games", "gog", "prime-gaming", "steam"],
   "app_version": "2.8.53",
   "panel_url": "https://fgc.example.com",
+  "recent_claims": [
+    { "title": "Space Grunts: Chrono Shard", "service": "prime-gaming", "service_name": "Prime Gaming", "claimed_at": "2026-06-26 07:30:34.027", "store_url": "https://gaming.amazon.com/...", "status": "claimed" }
+  ],
   "services": {
     "prime-gaming": { "name": "Prime Gaming", "unit": "games", "this_week": 3, "this_month": 12, "all_time": 87, "last_claim_at": "2026-06-26 07:30:34.027" },
     "microsoft":    { "name": "Microsoft Rewards", "unit": "points", "this_week": 0, "this_month": 3500, "all_time": 13912, "last_claim_at": "2026-06-15 11:19:00.381" }
@@ -43,7 +46,7 @@ The panel exposes a single REST endpoint (`/api/hass/sensors`) that returns a fl
 }
 ```
 
-The **top-level fields** are the common cases most users want to graph. The **`services` sub-object** breaks out per-service claim history for users who want a sensor per storefront.
+The **top-level fields** are the common cases most users want to graph. The **`recent_claims` array** (v2.11.14+) holds the last 10 claims, newest first, with the same data as the Stats tab's "Recent claims" list. The **`services` sub-object** breaks out per-service claim history for users who want a sensor per storefront.
 
 ---
 
@@ -77,6 +80,7 @@ sensor:
       - stale_session_ids
       - pending_errors
       - captcha_pending
+      - recent_claims
       - services
       - app_version
 ```
@@ -134,6 +138,51 @@ template:
              or state_attr('sensor.fgc', 'captcha_pending') }}
         device_class: problem
 ```
+
+---
+
+## Recent claims list
+
+`recent_claims` holds up to 10 rows, newest first. Each row has:
+
+| Key | Example | Notes |
+|---|---|---|
+| `title` | `"Space Grunts: Chrono Shard"` | Game / item title |
+| `service` | `"prime-gaming"` | Site id (stable, for templates and conditions) |
+| `service_name` | `"Prime Gaming"` | Display name |
+| `claimed_at` | `"2026-06-26 07:30:34.027"` | Panel-local time |
+| `store_url` | `"https://..."` | Store page, may be `null` |
+| `status` | `"claimed"` | Status from the per-service claim DB |
+
+`recent_claims[0]` is the same claim as the `last_claim_*` fields, so existing templates keep working.
+
+**Markdown card** (Dashboard → Add card → Markdown) listing the last 10 claims with links:
+
+```yaml
+type: markdown
+title: Recent free games
+content: |
+  {% for c in state_attr('sensor.fgc', 'recent_claims') or [] %}
+  - {% if c.store_url %}[{{ c.title }}]({{ c.store_url }}){% else %}{{ c.title }}{% endif %} · {{ c.service_name }} · {{ c.claimed_at[:10] }}
+  {% else %}
+  No claims yet.
+  {% endfor %}
+```
+
+**Template sensor** counting today's claims:
+
+```yaml
+template:
+  - sensor:
+      - name: FGC Claims Today
+        state: >-
+          {{ (state_attr('sensor.fgc', 'recent_claims') or [])
+             | selectattr('claimed_at', 'match', now().strftime('%Y-%m-%d'))
+             | list | count }}
+        unit_of_measurement: games
+```
+
+The count tops out at 10 because the array is capped. For larger totals use `games_this_week` / `games_this_month`.
 
 ---
 

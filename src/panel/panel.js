@@ -3,8 +3,9 @@ import net from 'node:net';
 import { spawn, execFile } from 'node:child_process';
 import { watch, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
-import { datetime, notify, jsonDb, normalizeTitle, cleanProfileLocks, readDigestBuffer, markDigestFlushed, stripGpTail, dataDir, rootDir, urlLocale } from '#src/util.js';
+import { datetime, notify, jsonDb, normalizeTitle, cleanProfileLocks, readDigestBuffer, markDigestFlushed, stripGpTail, dataDir, rootDir, urlLocale, isNetworkErrorMessage } from '#src/util.js';
 import { launchContext } from '#src/browser.js';
+import { epicImportMissingSessionReason } from '#src/epic-session.js';
 import { cfg } from '#src/config.js';
 import { describeConfig, patchConfig, describeEnv, getSchedulerConfig, CONFIG_FILE_PATH, readConfigFile, writeConfigFile, setByPath as cfgSetByPath, deleteByPath as cfgDeleteByPath } from '#src/app-config.js';
 import { SITES as SITE_REGISTRY, getLoginSitesById, getClaimScriptOrder, getLinkedActiveMap, getClaimDbFiles, getServiceRows, normalizeClaimCommand, getCustomSites, getCustomLoginSites } from '#src/sites.js';
@@ -28,10 +29,9 @@ const NOVNC_URL = (process.env.NOVNC_URL || '').replace(/\/+$/, '');
 // stops happening (v2.12.2 fixed a bug where all three copies included
 // `claimed`, hiding DOOM Eternal + similar from the Alerts tab / HA
 // sensors while the daily Prime run kept notifying about them). Must stay
-// in sync with prime-gaming.js:144 `/redeemed|expired|invalid/i` — this
-// superset adds `dismissed` (Alerts-tab Mark-dismissed action) and
-// `retries exhausted` (GOG retry-loop end state), both of which
-// prime-gaming.js filters via other mechanisms upstream.
+// in sync with prime-gaming.js + gog.js `/redeemed|expired|invalid|dismissed/i`
+// — this superset adds `retries exhausted` (GOG retry-loop end state),
+// which prime-gaming.js intentionally surfaces as a pending notification.
 //
 // Filed under feedback_no_local_shadow_of_shared_helper — regex drift
 // across duplicated logic. Also see feedback_check_both_code_paths.
@@ -401,14 +401,14 @@ async function verifyAndClose() {
   const result = await site.checkLogin(page);
 
   if (result.loggedIn) {
-    console.log(`[${datetime()}] Login verified for ${site.name} as ${result.user}. Saving session.`);
+    console.log(`[${datetime()}] Login verified for ${site.name} as ${result.user}. Saving session.${result.warning ? ` Warning: ${result.warning}` : ''}`);
     siteStatus[siteId] = { status: 'logged_in', user: result.user, checkedAt: datetime() };
     await context.close();
     activeBrowser = null;
-    return { success: true, loggedIn: true, user: result.user, site: siteId };
+    return { success: true, loggedIn: true, user: result.user, site: siteId, warning: result.warning || null };
   } else {
-    console.log(`[${datetime()}] Login NOT detected for ${site.name}. Browser remains open.`);
-    return { success: true, loggedIn: false, site: siteId, message: 'Login not detected. Please complete the login process and try again.' };
+    console.log(`[${datetime()}] Login NOT detected for ${site.name}. Browser remains open.${result.reason ? ` ${result.reason}` : ''}`);
+    return { success: true, loggedIn: false, site: siteId, message: result.reason ? `Login not complete: ${result.reason}` : 'Login not detected. Please complete the login process and try again.' };
   }
 }
 
@@ -450,7 +450,7 @@ async function checkSiteStatus(siteId) {
       user: result.user || null,
       checkedAt: datetime(),
     };
-    console.log(`[${datetime()}] ${site.name}: ${result.loggedIn ? `logged in as ${result.user}` : 'not logged in'}`);
+    console.log(`[${datetime()}] ${site.name}: ${result.loggedIn ? `logged in as ${result.user}` : 'not logged in'}${result.reason || result.warning ? ` — ${result.reason || result.warning}` : ''}`);
     return { ...result, site: siteId };
   } catch (e) {
     console.error(`[${datetime()}] Check failed for ${site.name}:`, e.message);
@@ -494,7 +494,8 @@ function normalizeCookieEntry(c) {
   if (c.secure)   out.secure = true;
   if (c.sameSite) {
     const s = String(c.sameSite).toLowerCase();
-    out.sameSite = s === 'strict' ? 'Strict' : s === 'none' ? 'None' : 'Lax';
+    // Cookie-Editor writes SameSite=None as "no_restriction".
+    out.sameSite = s === 'strict' ? 'Strict' : s === 'none' || s === 'no_restriction' ? 'None' : 'Lax';
   }
   return out;
 }
@@ -558,12 +559,15 @@ async function importSiteCookies(siteId, rawCookies) {
   // the cookies actually activated a session, or stays at "not logged
   // in" if they didn't (expired, missing the auth cookie, etc.).
   const checkResult = await checkSiteStatus(siteId);
+  const hint = siteId === 'epic-games' && !checkResult.loggedIn ? epicImportMissingSessionReason(normalized) : null;
   return {
     applied: normalized.length,
     matchedDomain: matches.length,
     targetHost,
     loggedIn: !!checkResult.loggedIn,
     user: checkResult.user || null,
+    reason: hint || checkResult.reason || null,
+    warning: checkResult.warning || null,
   };
 }
 
@@ -914,6 +918,7 @@ function _captureErrorContext() {
         ms_redeem_threshold: cfg.ms_redeem_threshold,
         ms_run_with_main_chain: !!cfg.ms_run_with_main_chain,
         ae_credsSet: has('AE_EMAIL') && has('AE_PASSWORD'),
+        joybuy_credsSet: (has('JOYBUY_EMAIL') || has('EMAIL')) && (has('JOYBUY_PASSWORD') || has('PASSWORD')),
         pg_credsSet: has('PG_EMAIL') || has('EMAIL'),
         eg_credsSet: has('EG_EMAIL') || has('EMAIL'),
         steam_credsSet: has('STEAM_EMAIL') || has('EMAIL'),
@@ -982,6 +987,11 @@ function _recordDiagnosticError(script, errorClass, message, stackLines) {
   // service runs successfully again — swept in recordLastRunSuccess.
   const siteId = _resolveSiteIdFromScript(script);
   const priorSuccess = siteId && lastRunSuccess && lastRunSuccess[siteId];
+  // Network-layer failures (DNS, link down — see NETWORK_ERROR_RE) are
+  // always transient, even on recurrence: intermittent host DNS recurs by
+  // nature and there's nothing in the code to report (#158). They stay
+  // listed with the "watching" pill and clear on the service's next success.
+  const networkClass = isNetworkErrorMessage(message);
   if (!errors[fp]) {
     errors[fp] = {
       script: script || 'unknown',
@@ -994,7 +1004,7 @@ function _recordDiagnosticError(script, errorClass, message, stackLines) {
       lastSeen: nowIso,
       count: 1,
       decided: null,
-      transientLikely: !!priorSuccess,
+      transientLikely: !!priorSuccess || networkClass,
     };
   } else {
     errors[fp].lastSeen = nowIso;
@@ -1009,7 +1019,9 @@ function _recordDiagnosticError(script, errorClass, message, stackLines) {
     errors[fp].context = _captureErrorContext();
     // Recurrence promotes it out of transient-likely — this fingerprint
     // has now been seen more than once, so treat as a real actionable error.
-    if (errors[fp].transientLikely) errors[fp].transientLikely = false;
+    // Network-class errors are the exception (re-tagged here so entries
+    // recorded before #158 get picked up on their next hit).
+    errors[fp].transientLikely = networkClass && !errors[fp].decided;
   }
   // Best-effort persist; failures here don't block the run.
   diagnosticsDb.write().catch(e => console.warn(`[${datetime()}] diagnostics-state write failed: ${e.message}`));
@@ -1034,7 +1046,7 @@ const DIAG_PATTERNS = [
   /^Exception:\s+(?<msg>.+)$/,
 ];
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
-const LEADING_MARKERS_RE = /^\s*[✓✗!✅❌]\s+/;
+const LEADING_MARKERS_RE = /^\s*[✓✗!✅❌–•]\s+/;
 // Per-stream rolling tail of recent cleaned lines. Each invocation of
 // _scanForErrors prepends the tail of the matching stream to the new
 // chunk before scanning so the pre-error context window can reach
@@ -1176,7 +1188,12 @@ function buildClaimCommand({ manual = false, sites = null } = {}) {
   if (sites && [...targetSet].some(id => id.startsWith('custom-')) && !parts.includes('node src/platforms/custom-website.js')) {
     parts.push('node src/platforms/custom-website.js');
   }
-  return parts.length ? parts.join('; ') : null;
+  if (!parts.length) return null;
+  if (parts.length === 1) return parts[0];
+  // A plain `a; b; c` chain exits with the LAST script's code, so an Epic
+  // exception mid-chain still finished the run as success/exit 0 (#163).
+  // Keep running every script, but remember the last non-zero exit.
+  return 'rc=0; ' + parts.map(p => p + ' || rc=$?').join('; ') + '; exit $rc';
 }
 
 // Env overrides let people keep the original hard-coded pipelines if they
@@ -1888,6 +1905,10 @@ function runAllScripts({ source = 'panel', sites = null, extraEnv = null } = {})
   // marker on clean exit; the runner sums the metrics across all of
   // them into a single run-complete line.
   const runAgg = { services: 0, claimed: 0, skipped: 0, failed: 0, alreadyOwned: 0, tracked: 0, new: 0, pointsEarned: 0, onPage: 0, coins: 0 };
+  // microsoft.js reached its end-of-session summary. Decides whether to mark
+  // today's MS schedule fired now that the chain exit code also reflects
+  // failures in earlier scripts.
+  let msReportedOk = false;
 
   // detached:true makes bash the leader of a new process group so the
   // Stop endpoint can SIGTERM the whole group (bash + node children +
@@ -1945,6 +1966,7 @@ function runAllScripts({ source = 'panel', sites = null, extraEnv = null } = {})
       // markers (microsoft + microsoft-mobile) at the end of the run.
       for (const m of text.matchAll(/\[run\] service=(\S+) ok((?:\s+\w+=\d+)*)/g)) {
         recordLastRunSuccess(m[1]);
+        if (m[1] === 'microsoft' || m[1] === 'microsoft-mobile') msReportedOk = true;
         runAgg.services++;
         for (const f of m[2].matchAll(/(\w+)=(\d+)/g)) {
           if (runAgg[f[1]] != null) runAgg[f[1]] += Number(f[2]);
@@ -2033,7 +2055,10 @@ function runAllScripts({ source = 'panel', sites = null, extraEnv = null } = {})
     };
 
     child.on('close', code => {
-      runStatus = code === 0 ? 'success' : 'finished';
+      // 'finished' = "last run had errors" (Sessions strip, Logs ✗, HA
+      // last_run_status). Per-item failures count too: a service can exit
+      // 0 after a claim failed (e.g. Epic's page-closed early exit).
+      runStatus = code === 0 && !runAgg.failed ? 'success' : 'finished';
       // Run-level footer summarises the aggregated [run] markers. claimed
       // and skipped always show (even when zero) so users can scan
       // vertically for the headline counts. Other fields appear only when
@@ -2071,7 +2096,9 @@ function runAllScripts({ source = 'panel', sites = null, extraEnv = null } = {})
       // loop won't re-fire later the same day. Without this, a manual
       // 09:00 click + scheduled 10:48 fire would double-run MS.
       // Basename, not `node <path>`: the registry owns the path, and it moves.
-      if (code === 0 && /\bmicrosoft\.js\b/.test(cmd)) {
+      // A non-zero chain exit can now come from an earlier script, so also
+      // accept microsoft.js's own [run] marker as proof that it ran.
+      if ((code === 0 || msReportedOk) && /\bmicrosoft\.js\b/.test(cmd)) {
         try { markMsRunFiredToday(); } catch {}
       }
       // Persist the scheduler-main completion timestamp so a panel
@@ -2269,12 +2296,16 @@ function _sweepStaleUndecidedDiagnostics() {
   for (const fp of Object.keys(errs)) {
     const e = errs[fp];
     if (!e || e.decided) continue;
-    if ((e.count || 0) !== 1) continue;
+    // Network-class entries (#158) are swept at any count — recurrence of
+    // a DNS blip isn't a signal that something in the code is wrong.
+    if ((e.count || 0) !== 1 && !isNetworkErrorMessage(e.message)) continue;
     const entrySiteId = e.siteId || _resolveSiteIdFromScript(e.script);
     if (!entrySiteId) continue;
     const successAt = lastRunSuccess && lastRunSuccess[entrySiteId];
     if (!successAt) continue;
-    const firstSeenMs = Date.parse(e.firstSeen);
+    // lastSeen, not firstSeen: a multi-count network entry must be
+    // superseded by a success AFTER its latest hit (identical for count 1).
+    const firstSeenMs = Date.parse(e.lastSeen || e.firstSeen);
     // lastRunSuccess is "YYYY-MM-DD HH:MM:SS" (local slice) — replace the
     // space with T so Date.parse treats it as ISO-ish. Fall through on
     // any non-finite conversion (defensive).
@@ -3554,6 +3585,34 @@ async function getAliexpressData() {
   return { latestBalance, latestAt, weekEarned, monthEarned, row };
 }
 
+// Joybuy tracks a daily point balance in data/joybuy.json (written by
+// joybuy.js). Similar shape to AliExpress — we surface the latest balance
+// and per-window "earned" totals in the Stats tab.
+async function getJoybuyData() {
+  let db;
+  try { db = await jsonDb('joybuy.json', { runs: [] }); }
+  catch { return { latestBalance: null, latestAt: null, weekEarned: 0, monthEarned: 0, row: null }; }
+  const runs = (db.data && Array.isArray(db.data.runs)) ? db.data.runs : [];
+  const now = Date.now();
+  const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
+  const monthAgo = now - 30 * 24 * 60 * 60 * 1000;
+  const toMs = s => { const d = parseLocalDateTime(s); return d ? d.getTime() : 0; };
+  let latestBalance = null, latestAt = null, latestMs = 0;
+  let weekEarned = 0, monthEarned = 0, allTimeEarned = 0;
+  for (const r of runs) {
+    const tMs = toMs(r.at);
+    const earned = Number.isFinite(r.earned) ? Math.max(0, r.earned) : 0;
+    allTimeEarned += earned;
+    if (tMs >= weekAgo)  weekEarned  += earned;
+    if (tMs >= monthAgo) monthEarned += earned;
+    if (r.balance != null && tMs >= latestMs) { latestBalance = r.balance; latestAt = r.at; latestMs = tMs; }
+  }
+  const row = runs.length
+    ? { thisWeek: weekEarned, thisMonth: monthEarned, allTime: allTimeEarned, lastClaimAt: latestAt, unit: 'points' }
+    : null;
+  return { latestBalance, latestAt, weekEarned, monthEarned, row };
+}
+
 async function getStatsSummary() {
   const [claims, ms] = await Promise.all([readAllClaims(), getMsRewards()]);
   const now = Date.now();
@@ -3582,7 +3641,7 @@ async function getStatsSummary() {
 }
 
 async function getStatsByService() {
-  const [claims, ms, ae] = await Promise.all([readAllClaims(), getMsRewards(), getAliexpressData()]);
+  const [claims, ms, ae, jb] = await Promise.all([readAllClaims(), getMsRewards(), getAliexpressData(), getJoybuyData()]);
   const rows = {};
   for (const svc of Object.keys(CLAIM_DB_FILES)) {
     rows[svc] = { id: svc, unit: 'games', thisWeek: 0, thisMonth: 0, allTime: 0, lastClaimAt: null };
@@ -3592,6 +3651,9 @@ async function getStatsByService() {
   rows['microsoft-mobile'] = { id: 'microsoft-mobile', ...ms.bySession['microsoft-mobile'] };
   if (ae.row) {
     rows['aliexpress'] = { id: 'aliexpress', ...ae.row };
+  }
+  if (jb.row) {
+    rows['joybuy'] = { id: 'joybuy', ...jb.row };
   }
   const now = Date.now();
   const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
@@ -5484,7 +5546,7 @@ function renderDiagnosticContext(ctx) {
     flagBits.push('ms_search_delay_max=' + (f.ms_search_delay_max ?? '?') + ', ms_redeem_threshold=' + (f.ms_redeem_threshold ?? '?') + ', ms_run_with_main_chain=' + !!f.ms_run_with_main_chain);
     const credsSet = [];
     const credsMiss = [];
-    const credKeys = [['prime-gaming', 'pg_credsSet'], ['epic-games', 'eg_credsSet'], ['steam', 'steam_credsSet'], ['gog', 'gog_credsSet'], ['microsoft', 'ms_credsSet'], ['aliexpress', 'ae_credsSet']];
+    const credKeys = [['prime-gaming', 'pg_credsSet'], ['epic-games', 'eg_credsSet'], ['steam', 'steam_credsSet'], ['gog', 'gog_credsSet'], ['microsoft', 'ms_credsSet'], ['aliexpress', 'ae_credsSet'], ['joybuy', 'joybuy_credsSet']];
     for (const [name, key] of credKeys) (f[key] ? credsSet : credsMiss).push(name);
     flagBits.push('credentials set: ' + (credsSet.join(', ') || '(none)') + (credsMiss.length ? ' — missing: ' + credsMiss.join(', ') : ''));
     flagBits.push('notify_level=' + (f.notify_level || '?') + ', base_path=' + (f.base_path_set ? 'set' : 'unset') + ', public_url=' + (f.public_url_set ? 'set' : 'unset') + ', novnc_url=' + (f.novnc_url_set ? 'set' : 'unset'));
@@ -6607,12 +6669,16 @@ function fieldRow(path, label, extra) {
     const sensAttr = sensitive ? ' data-sensitive-state="' + sensState + '"' : '';
     inputHtml = '<textarea' + sensAttr + ' oninput="setSettingValue(\\'' + path + '\\', this.value)">' + escapeHtml(value || '') + '</textarea>';
   } else if (f.type === 'array') {
-    // v2.12.0 (#148): text-input on the joined value; comma-or-whitespace
-    // split on change. Schema coerce filters invalid tokens, so a typo
-    // like "epicgames" (missing hyphen) drops silently rather than
-    // rejecting the whole save.
+    // v2.12.0 (#148): text-input on the joined value; comma-or-space
+    // split on change. The schema's validate rejects unknown tokens, so a
+    // typo fails the save with an error toast. The split class uses a
+    // literal space, not the whitespace escape: the regex sits inside a
+    // client string inside PANEL_HTML, the escape lost both backslashes
+    // to the two escape passes, and the class became comma-or-letter-s,
+    // which split "epic-games" into "epic-game" and "steam" into "team"
+    // (#173).
     const asStr = Array.isArray(value) ? value.join(', ') : '';
-    inputHtml = '<input type="text" value="' + escapeHtml(asStr) + '" oninput="setSettingValue(\\'' + path + '\\', this.value.split(/[,\\s]+/).map(s => s.trim()).filter(Boolean))">';
+    inputHtml = '<input type="text" value="' + escapeHtml(asStr) + '" oninput="setSettingValue(\\'' + path + '\\', this.value.split(/[, ]+/).map(s => s.trim()).filter(Boolean))">';
   } else {
     const sensAttr = sensitive ? ' data-sensitive-state="' + sensState + '"' : '';
     // Preset quick-pick (e.g. the IKEA country list): a dropdown above the
@@ -6670,6 +6736,8 @@ function serviceSummary(id) {
     }
     case 'aliexpress':
       return 'Daily check-in coins · mobile site';
+    case 'joybuy':
+      return 'Daily check-in JoyPoints · mobile site';
     default:
       return '';
   }
@@ -7601,6 +7669,7 @@ function renderScheduleTab() {
   const sites = state.sites || [];
   const activeGames = sites.filter(s => s.active && GAME_IDS.has(s.id));
   const hasAE = sites.some(s => s.active && s.id === 'aliexpress');
+  const hasJB = sites.some(s => s.active && s.id === 'joybuy');
   const hasMS = sites.some(s => s.active && s.id === 'microsoft');
   // Watchers are in state.watchers (not state.sites). They run on each
   // main-chain fire as part of the bash command — listing them in the
@@ -7612,7 +7681,7 @@ function renderScheduleTab() {
   const lenovoWatcher = allWatchers.find(w => w.id === 'lenovo-gaming');
   const byName = (a, b) => (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' });
   standardWatchers.sort(byName);
-  const activeCount = activeGames.length + (hasAE ? 1 : 0) + (hasMS ? 1 : 0)
+  const activeCount = activeGames.length + (hasAE ? 1 : 0) + (hasJB ? 1 : 0) + (hasMS ? 1 : 0)
     + standardWatchers.length + (lenovoWatcher ? 1 : 0);
 
   const svcLines = [];
@@ -7621,6 +7690,9 @@ function renderScheduleTab() {
   }
   if (hasAE) {
     svcLines.push('<b>AliExpress</b> — collect daily check-in coins <span class="muted">(no specific window; runs on each scheduled fire)</span>');
+  }
+  if (hasJB) {
+    svcLines.push('<b>Joybuy</b> — collect daily check-in JoyPoints <span class="muted">(no specific window; runs on each scheduled fire)</span>');
   }
   if (hasMS) {
     if ((state.msScheduleHours || 0) > 0) {
@@ -9009,7 +9081,8 @@ async function verifyLogin() {
   try {
     const r = await api('POST', '/verify');
     if (r.loggedIn) {
-      showToast('Logged in as ' + r.user + '! Session saved.', 'success');
+      if (r.warning) showToast('Logged in as ' + r.user + ', but: ' + r.warning, 'info', 12000);
+      else showToast('Logged in as ' + r.user + '! Session saved.', 'success');
       hideVnc();
     } else {
       showToast(r.message || 'Login not detected. Keep trying.', 'error');
@@ -9037,7 +9110,9 @@ async function checkSite(siteId) {
   try {
     const r = await api('POST', '/check', { site: siteId });
     if (r.error) showToast(r.error, 'error');
+    else if (r.loggedIn && r.warning) showToast(siteName + ': logged in as ' + r.user + ', but: ' + r.warning, 'info', 12000);
     else if (r.loggedIn) showToast(siteName + ': logged in as ' + r.user, 'success');
+    else if (r.reason) showToast(siteName + ': not logged in — ' + r.reason, 'error', 12000);
     else showToast(siteName + ': not logged in', 'error');
   } catch (e) { showToast('Error: ' + e.message, 'error'); }
   busy = false;
@@ -9112,9 +9187,10 @@ async function submitCookies() {
     if (result.success) {
       const note = result.loggedIn
         ? 'Imported ' + result.applied + ' cookie(s); session check passed' + (result.user ? ' (logged in as ' + result.user + ')' : '')
-        : 'Imported ' + result.applied + ' cookie(s); session check still says not logged in (cookies may be expired or missing the auth cookie)';
+        : 'Imported ' + result.applied + ' cookie(s); session check still says not logged in (' + (result.reason || 'cookies may be expired or missing the auth cookie') + ')';
       closeCookieModal();
-      showToast(note, result.loggedIn ? 'success' : 'info', 6000);
+      if (result.loggedIn && result.warning) showToast(note + ', but: ' + result.warning, 'info', 12000);
+      else showToast(note, result.loggedIn ? 'success' : 'info', result.reason ? 12000 : 6000);
       await refreshState();
     } else {
       setCookieMsg(result.error || 'Import failed', 'error');
@@ -9210,7 +9286,7 @@ function openRunPicker() {
   const groups = { game: [], points: [], watch: [] };
   active.forEach(s => {
     const cat = s.scheduleKind === 'watch-only' ? 'watch'
-      : (s.id === 'aliexpress' || (s.id || '').indexOf('microsoft') === 0) ? 'points'
+      : (s.id === 'aliexpress' || s.id === 'joybuy' || (s.id || '').indexOf('microsoft') === 0) ? 'points'
       : 'game';
     groups[cat].push(s);
   });
@@ -9241,9 +9317,9 @@ function openRunPicker() {
   };
 
   let html = '';
-  html += renderGroup('Claimers', groups.game.filter(s => s.id !== 'aliexpress'));
-  // AliExpress is daily-chain but conceptually a points collector; show it with MS.
-  const pointsGroup = groups.points.concat(groups.game.filter(s => s.id === 'aliexpress'));
+  html += renderGroup('Claimers', groups.game.filter(s => s.id !== 'aliexpress' && s.id !== 'joybuy'));
+  // AliExpress and Joybuy are daily-chain but conceptually points collectors; show with MS.
+  const pointsGroup = groups.points.concat(groups.game.filter(s => s.id === 'aliexpress' || s.id === 'joybuy'));
   pointsGroup.sort(byName);
   html += renderGroup('Point / coin collectors', pointsGroup);
   html += renderGroup('Watchers', groups.watch);
@@ -11351,6 +11427,7 @@ server.listen(PANEL_PORT, async () => {
     const sweepDirs = [
       cfg.dir.browser,
       cfg.dir.browser + '-aliexpress',
+      cfg.dir.browser + '-joybuy',
       cfg.dir.browser + '-mobile',
       cfg.dir.browser + '-lenovo',
     ];

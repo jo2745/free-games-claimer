@@ -106,7 +106,12 @@ fi
 # TurboVNC server replaces Xvfb+x11vnc
 # shellcheck disable=SC2086
 /opt/TurboVNC/bin/vncserver $DISPLAY -geometry "${WIDTH}x${HEIGHT}" -depth "${DEPTH}" -rfbport "${VNC_PORT}" $pw -vgl -log /fgc/data/TurboVNC.log -xstartup /usr/bin/ratpoison 2>/dev/null # -noxstartup -novnc /usr/share/novnc/
-websockify -D --web "/usr/share/novnc/" "$NOVNC_PORT" "localhost:$VNC_PORT" 2>/dev/null 1>&2 &
+# No -D: websockify's daemonize() calls close() on every fd up to the
+# hard RLIMIT_NOFILE before it starts listening. Where that limit is
+# ~1e9 (Proxmox LXC, newer systemd/containerd) that's 10+ minutes at
+# 100% CPU with the noVNC port dead (#172). `&` already backgrounds it.
+# Log to data/ instead of /dev/null so a hang leaves a trace.
+websockify --web "/usr/share/novnc/" "$NOVNC_PORT" "localhost:$VNC_PORT" >/fgc/data/websockify.log 2>&1 &
 echo "  VNC:   port ${VNC_PORT} (${pwt}), ${WIDTH}x${HEIGHT}"
 echo "  noVNC: http://localhost:${NOVNC_PORT}/?autoconnect=true"
 

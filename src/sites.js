@@ -50,11 +50,12 @@
 // SERVICE_ROWS, …) that read these fields. Until then the new fields are
 // metadata-only and safe to ignore.
 
-import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { devices } from 'patchright';
 import { cfg } from './config.js';
 import { ROOT_DIR, RUNNER_NAME_RE, platformFile, dataDir } from './paths.js';
+import { checkEpicAccountSession, resumeEpicAccountSwitcher } from './epic-session.js';
 
 // Resolves a runner through the '#platforms/*' alias in package.json, so the
 // directory is declared once and serves both `import` and the spawned
@@ -369,18 +370,36 @@ export const SITES = [
       { key: 'claimMobile', env: 'EG_MOBILE', type: 'boolean', default: true,
         label: 'Claim mobile games',
         coerce: { kind: 'boolDefaultTrue' } },
+      { key: 'captchaWaitMin', env: 'EG_CAPTCHA_WAIT_MIN', type: 'number', default: 3,
+        label: 'Captcha solve time (minutes)',
+        hint: 'When Epic shows a captcha, the claim waits this long for you to solve it in the browser view (noVNC) before giving up on that game. Runs without a captcha are not affected.',
+        coerce: { kind: 'numberBounded', min: 1, fallback: 3 } },
     ],
     async checkLogin(page) {
       try {
-        await page.goto('https://store.epicgames.com/en-US/free-games', { waitUntil: 'domcontentloaded', timeout: 20000 });
-        await page.waitForTimeout(3000);
-        const nav = page.locator('egs-navigation');
-        const isLoggedIn = await nav.getAttribute('isloggedin');
-        if (isLoggedIn === 'true') {
-          const user = await nav.getAttribute('displayname');
-          return { loggedIn: true, user: user || 'unknown' };
-        }
-        return { loggedIn: false };
+        const check = async () => {
+          await page.goto('https://store.epicgames.com/en-US/free-games', { waitUntil: 'domcontentloaded', timeout: 20000 });
+          await page.waitForTimeout(3000);
+          const nav = page.locator('egs-navigation');
+          const isLoggedIn = await nav.getAttribute('isloggedin');
+          if (isLoggedIn === 'true') {
+            const user = await nav.getAttribute('displayname');
+            // The header only reflects the store's refresh token, which
+            // outlives the account session claims need — ask Epic (#163).
+            const acct = await checkEpicAccountSession(page.context());
+            if (!acct.ok) return { loggedIn: false, user: user || null, reason: acct.reason };
+            return { loggedIn: true, user: user || 'unknown', ...(acct.warning && { warning: acct.warning }) };
+          }
+          return { loggedIn: false };
+        };
+        const r = await check();
+        if (r.loggedIn) return r;
+        // Same account-switcher recovery as the runner (#163): a lapsed
+        // session on a known device is one click from signed in again.
+        await page.goto(this.loginUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        if (!await resumeEpicAccountSwitcher(page, cfg.eg_email)) return r;
+        await page.waitForURL('https://store.epicgames.com/**', { timeout: 30000 }).catch(() => {});
+        return await check();
       } catch (e) {
         // Surface the error so postRunSessionCheck can distinguish "page
         // rendered, said not logged in" from "couldn't check at all"
@@ -632,7 +651,7 @@ export const SITES = [
   {
     id: 'aliexpress',
     name: 'AliExpress',
-    version: '2.3',
+    version: '2.4',
     subtitle: 'Deprecated by AliExpress — web coin collection is being phased out in favor of the mobile app. Works for some accounts on a degradation curve. See README → Bot detection.',
     script: platformScript('aliexpress'),
     claimOrder: 5,
@@ -649,7 +668,11 @@ export const SITES = [
     claimDbFile: null,
     scheduleKind: 'daily-chain',
     features: [],
-    configFields: [],
+    configFields: [
+      { key: 'missions', env: 'AE_MISSIONS', type: 'boolean', default: false,
+        label: 'Also do the browse missions and the quiz',
+        hint: 'After the check-in, opens each coin-paying "visit this page" mission on the coin page and stays for the time it asks for (about 15 seconds each, so a few minutes per run), then answers the daily coin quiz. New quiz questions are a best guess; the right answer is saved for when a question comes back. Also takes the "turn on notifications" reward and the "daily check-in" mission that unlocks the quiz. Never touches missions that act on your account (cart, share), the app-only ones (farm, shortcut, widget), or the ones that ask you to click on sponsored items. Off by default — more automated activity may draw more attention from AliExpress\'s bot detection.' },
+    ],
     async checkLogin(page) {
       // Structural selectors (locale-blind) first, English-text fallback
       // second — same pattern as aliexpress.js auth() / coins() shipped in
@@ -660,14 +683,17 @@ export const SITES = [
       // and this one was missed in the v2.8.35 sweep.
       const STRUCT_LOGIN_LINK = 'a[href*="/login"], a[href*="/signin" i], button[data-spm*="login" i]';
       const STRUCT_CLAIMABLE  = '#signButton[class*="aecoin-checkInButton"], [id="signButton"][class*="checkInButton"]';
-      const STRUCT_DONE       = '#signButton[class*="aecoin-taskButton"], [id="signButton"][class*="taskButton"]';
-      const loginBtn = page.locator(STRUCT_LOGIN_LINK + ', button:has-text("Log in")');
-      const streak = page.locator(STRUCT_CLAIMABLE + ', h3:text-is("day streak")');
+      // + 2026-10 redesign's today-checked classes (#170/#171), same as auth().
+      const STRUCT_DONE       = '#signButton[class*="aecoin-taskButton"], [id="signButton"][class*="taskButton"], [class*="aecoin-today-checked"], [class*="aecoin-isTodayChecked"]';
+      const loginBtn = page.locator(STRUCT_LOGIN_LINK + ', button:has-text("Log in")').first();
+      const streak = page.locator(STRUCT_CLAIMABLE + ', h3:text-is("day streak")').first();
       // Post-collect state — the "day streak" h3 disappears once the user has
       // claimed today's coins, but "Earn more coins" stays visible. Treat that
       // as logged-in too so users who already collected manually don't get a
       // false "session expired" report from the panel.
-      const collectedToday = page.locator(STRUCT_DONE + ', button:has-text("Earn more coins")');
+      // .first(): the redesign's today-checked classes match several elements
+      // and waitFor() is strict.
+      const collectedToday = page.locator(STRUCT_DONE + ', button:has-text("Earn more coins")').first();
       // AliExpress mobile frequently hangs on initial load — same issue as in
       // aliexpress.js auth(). Auto-reload up to 3 times until either the login
       // button or either logged-in marker appears, then short-circuit.
@@ -687,6 +713,9 @@ export const SITES = [
           ]).catch(() => null);
           if (which === 'streak' || which === 'collectedToday') return { loggedIn: true, user: 'member' };
           if (which === 'login') return { loggedIn: false };
+          // Attached-but-not-visible fallback, same as aliexpress.js auth().
+          if (await streak.count() > 0 || await collectedToday.count() > 0) return { loggedIn: true, user: 'member' };
+          if (await loginBtn.count() > 0) return { loggedIn: false };
         }
         return { loggedIn: false };
       } catch (e) {
@@ -696,6 +725,124 @@ export const SITES = [
         // path skips entries with .error set — without this, a goto
         // timeout right after a heavy claim run silently became a
         // false "session expired" notification (observed 2026-05-25).
+        return { loggedIn: false, error: (e && e.message ? e.message.split('\n')[0] : String(e)).slice(0, 200) };
+      }
+    },
+  },
+  {
+    id: 'joybuy',
+    name: 'Joybuy',
+    version: '1.0',
+    subtitle: 'Daily check-in for JoyPoints (loyalty points) on the mobile web portal.',
+    script: platformScript('joybuy'),
+    claimOrder: 5.5,
+    loginUrl: 'https://m.joybuy.fr/joypoints-h5?hideTitle=true&compatInput=true',
+    get browserDir() { return cfg.dir.browser + '-joybuy'; },
+    get contextOptions() {
+      try {
+        const fpFile = path.join(cfg.dir.browser + '-joybuy', '.fgc-fingerprint.json');
+        if (existsSync(fpFile)) {
+          const cached = JSON.parse(readFileSync(fpFile, 'utf8'));
+          const fp = cached?.fingerprint;
+          if (fp?.navigator?.userAgent) {
+            return {
+              userAgent: fp.navigator.userAgent,
+              viewport: {
+                width: fp.screen?.width || 412,
+                height: fp.screen?.height || 915,
+              },
+              deviceScaleFactor: 2.625,
+              isMobile: true,
+              hasTouch: true,
+            };
+          }
+        }
+      } catch {}
+      return devices['Pixel 7'];
+    },
+    defaultActive: false,
+    activeEnv: 'JOYBUY_ACTIVE',
+    linkedWith: null,
+    scheduleKind: 'daily-chain',
+    async checkLogin(page) {
+      try {
+        const url = page.url();
+        if (url.includes('/login') || url.includes('/signin')) {
+          return { loggedIn: false };
+        }
+
+        // Navigate to joypoints-h5 only if not already on the portal
+        if (!url.includes('joypoints')) {
+          await page.goto('https://m.joybuy.fr/joypoints-h5?hideTitle=true&compatInput=true', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+        }
+
+        if (page.url().includes('/login') || page.url().includes('/signin')) {
+          return { loggedIn: false };
+        }
+
+        const cookies = await page.context().cookies().catch(() => []);
+        const pinCookie = cookies.find(c => (c.name === 'pin' || c.name === 'pt_pin') && c.value && c.domain?.includes('joybuy'));
+        const username = pinCookie?.value ? decodeURIComponent(pinCookie.value) : 'member';
+
+        // Check DOM and SSR payload for genuine authenticated markers vs login pages
+        const pageState = await page.evaluate(() => {
+          const streamId = document.querySelector('meta[name="stream-page-id"]')?.getAttribute('content');
+          const title = document.title || '';
+          const hasPasswordInput = !!document.querySelector('input[type="password"]');
+          const hasLoginLink = !!document.querySelector('a[href*="/login"], a[href*="/signin"], button[data-exp*="login" i]');
+          const isLoginPage = /connectez-vous|sign[\s-]*in|log[\s-]*in/i.test(title) ||
+                              streamId === 'NewLogin' ||
+                              streamId === 'Login' ||
+                              hasPasswordInput;
+
+          // Check for authenticated elements on the points portal
+          const hasDailyBtn = !!document.querySelector('button[data-exp*="Daily_checkin_btn"], [class*="DailyCheckin_checkinBtn"], [class*="DailyCheckin"] button');
+          const hasCheckedContent = !!document.querySelector('[class*="DailyCheckin_checkedContent"], [class*="checkedContent"]');
+          const hasPointsValue = !!document.querySelector('[class*="pointsValue"], [class*="pointsUnit"]');
+
+          // Check SSR data for checkInState (1 = UNSIGNED/claimable, 5 = SIGNED/done)
+          let checkInState = null;
+          const scripts = Array.from(document.querySelectorAll('script'));
+          for (const s of scripts) {
+            const text = s.textContent || '';
+            if (text.includes('checkInState')) {
+              const m = text.match(/"checkInState":\s*(\d+)/);
+              if (m) { checkInState = Number(m[1]); break; }
+            }
+          }
+
+          return { isLoginPage, hasDailyBtn, hasCheckedContent, hasPointsValue, checkInState, hasLoginLink };
+        }).catch(() => null);
+
+        if (pageState?.isLoginPage) {
+          return { loggedIn: false };
+        }
+
+        if (
+          pageState?.checkInState === 1 ||
+          pageState?.checkInState === 5 ||
+          pageState?.hasDailyBtn ||
+          pageState?.hasCheckedContent ||
+          pageState?.hasPointsValue
+        ) {
+          return { loggedIn: true, user: username };
+        }
+
+        // Targeted element locators (scoped to real elements)
+        const loginLocator = page.locator('input[type="password"], a[href*="/login"], a[href*="/signin"], button:has-text("Se connecter"), button:has-text("Connectez-vous")');
+        const authLocator = page.locator('button[data-exp*="Daily_checkin_btn"], [class*="DailyCheckin_checkinBtn"], [class*="DailyCheckin_checkedContent"], [class*="pointsValue"], [class*="pointsUnit"]');
+
+        const QUICK_WAIT_MS = 6000;
+        const which = await Promise.any([
+          loginLocator.first().waitFor({ state: 'visible', timeout: QUICK_WAIT_MS }).then(() => 'login'),
+          authLocator.first().waitFor({ state: 'visible', timeout: QUICK_WAIT_MS }).then(() => 'auth'),
+        ]).catch(() => null);
+
+        if (which === 'auth') return { loggedIn: true, user: username };
+        if (which === 'login') return { loggedIn: false };
+
+        return { loggedIn: false };
+      } catch (e) {
         return { loggedIn: false, error: (e && e.message ? e.message.split('\n')[0] : String(e)).slice(0, 200) };
       }
     },
