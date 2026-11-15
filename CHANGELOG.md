@@ -4,19 +4,26 @@ Release notes for the [free-games-claimer jo2745 fork](README.md). Most recent a
 
 ---
 
-## What's new in 2.12.38
+## What's new in 2.12.35.1
 
-Fork-local, synced with `feldorn/main` (`v2.12.35`).
+Fork-local, synced with `feldorn/main` (`v2.12.35`). Version follows
+upstream `X.Y.Z` with a fourth-part fork increment (`2.12.35.1`).
 
+- **IKEA login & cookie-import verification fix** — `makeIkeaCheckLogin()`
+  previously matched `[data-testid*="login"]` and `a[href*="/login"]`,
+  which remain in IKEA's header even when logged in — causing both
+  **↑ Cookie** import and **"I'm Logged In"** to falsely report not
+  logged in. Now checks positive logged-in signals first (visible
+  sign-out button or points balance) and only flags visible short
+  sign-in CTAs (`<= 40` chars), returning an explicit `reason` on failure.
+  Also recognizes Finnish `"Pieni hetki"` and `/cdn-cgi/challenge`
+  interstitials in `cfUp()`, and ignores hidden elements in
+  `ikea-rewards.js`'s `loginUp()` check.
 - **DigitalCore balance capture fix** — `custom-website.js` previously
   scanned only descendant elements (`el.querySelectorAll('*')`), which
   returned an empty list when the selector matched a leaf `<span>`
   (leaving `data/custom-balances.json` stuck on the old `4650` value).
   Now falls back to `[el]` when `el` itself is a leaf node.
-- **IKEA Cloudflare challenge detection** — `checkLogin` and
-  `ikea-rewards.js` now also recognize Finnish `"Pieni hetki"` and
-  `/cdn-cgi/challenge` interstitials so a Cloudflare challenge isn't
-  misreported as a stale session.
 - **Automatic upstream sync workflow** — `.github/workflows/sync-upstream.yml`
   runs every 6 hours (and via manual dispatch) to merge `feldorn/main`
   into `main` (removing `CLAUDE.md` automatically, syntax-checking

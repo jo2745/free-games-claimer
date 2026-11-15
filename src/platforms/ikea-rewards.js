@@ -84,7 +84,7 @@ const BALANCE_PAT = String.raw`(\d[\d\s\u00a0]{0,9})\s*(?:piste|pisteen|pistett�
 // spans the Nordic markets + the top EU languages; the in-page scan
 // rebuilds the RegExp from this string (single copy of the truth, same
 // discipline as ACTIVITY_PAT).
-const LOGIN_PAT = String.raw`\b(log in|logga in|sign in|inlogg[a-z]*|anmelden|anmeldung|se connecter|connexion|login|inloggen|inlog|iniciar sesión|accedi|log in|logg in)\b`;
+const LOGIN_PAT = String.raw`\b(kirjaudu\s+sis[äa]{2}n|log in|logga in|sign in|inlogg[a-z]*|anmelden|anmeldung|se connecter|connexion|login|inloggen|inlog|iniciar sesión|accedi|logg in)\b`;
 
 function loadState() {
   // { state, hadBaseline }: hadBaseline is true only when the file
@@ -175,10 +175,11 @@ try {
   // logged-in run's balance into a phantom "balance moved" ping (and
   // the logged-out shell's marketing tiles into phantom "new activities").
   const loginUp = () => page.evaluate(({ loginRe }) => {
-    if (/(^|\/)login/i.test(location.href)) return true;
+    if (/(^|\/)login/i.test(location.href) || /accounts\.ikea\.com/i.test(location.hostname)) return true;
     const RE = new RegExp(loginRe, 'i');
     for (const el of document.querySelectorAll('button, a, [role="button"], [role="link"]')) {
-      const text = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).trim();
+      try { if (el.offsetParent === null && getComputedStyle(el).visibility === 'hidden') continue; } catch { continue; }
+      const text = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).replace(/\s+/g, ' ').trim();
       if (text && text.length <= 40 && RE.test(text)) return true;
     }
     return false;

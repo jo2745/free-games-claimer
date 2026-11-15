@@ -255,16 +255,41 @@ function makeIkeaCheckLogin() {
         if (!(await cfUp())) break;
       }
       if (await cfUp()) {
-        return { loggedIn: false, user: `Cloudflare challenge up on ${host} — check noVNC, then re-check` };
+        const msg = `Cloudflare challenge up on ${host} — check noVNC, then re-check`;
+        return { loggedIn: false, user: msg, reason: msg };
       }
     }
-    const sel = 'a[href*="/login" i], a[href*="/signin" i], a:has-text("Log in"), a:has-text("Sign in"), button:has-text("Log in"), button:has-text("Sign in"), a:has-text("Logga in"), button:has-text("Logga in"), a:has-text("Log in"), [data-testid*="login" i]';
-    const n = await page.locator(sel).count().catch(() => 0);
-    let visible = 0;
-    for (let i = 0; i < n; i++) {
-      try { if (await page.locator(sel).nth(i).isVisible()) visible++; } catch { /* detached mid-check */ }
-    }
-    if (visible > 0) return { loggedIn: false, user: host };
+    const probe = await page.evaluate(() => {
+      if (/(^|\/)(login|signin)/i.test(location.pathname) || /accounts\.ikea\.com/i.test(location.hostname)) {
+        return { loggedIn: false, reason: 'on login page' };
+      }
+      const isVisible = (el) => {
+        try { return el.offsetParent !== null || getComputedStyle(el).position === 'fixed'; }
+        catch { return false; }
+      };
+      const logoutRe = /\b(log\s*out|sign\s*out|kirjaudu\s+ulos|logga\s+ut|abmelden|cerrar\s+sesi[oó]n|d[eé]connexion|esci|wyloguj|uitloggen)\b/i;
+      const loginRe = /\b(kirjaudu\s+sis[äa]{2}n|log\s*in|sign\s*in|logga\s+in|inlogg[a-z]*|anmelden|se\s+connecter|iniciar\s+sesi[oó]n|accedi|inloggen|logg\s+in)\b/i;
+      const balanceRe = /\d[\d\s\u00a0]{0,9}\s*(?:points?|pts?|piste(?:et|tt[äa]|it[äa])?|po[äa]ng|punkte|punti|puntos|punten|punkty|bod[ůy]|pont)/i;
+      for (const el of document.querySelectorAll('button, a, [role="button"], [role="link"]')) {
+        if (!isVisible(el)) continue;
+        const text = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).replace(/\s+/g, ' ').trim();
+        if (text && text.length <= 40 && logoutRe.test(text)) return { loggedIn: true };
+      }
+      for (const el of document.querySelectorAll('div, span, p, h1, h2, h3, h4')) {
+        if (!isVisible(el)) continue;
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (text && text.length <= 80 && balanceRe.test(text)) return { loggedIn: true };
+      }
+      for (const el of document.querySelectorAll('button, a, [role="button"], [role="link"]')) {
+        if (!isVisible(el)) continue;
+        const text = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).replace(/\s+/g, ' ').trim();
+        if (text && text.length <= 40 && loginRe.test(text) && !logoutRe.test(text)) {
+          return { loggedIn: false, reason: 'sign-in button visible on page' };
+        }
+      }
+      return { loggedIn: true };
+    }).catch(() => ({ loggedIn: false, reason: 'page evaluation failed' }));
+    if (!probe.loggedIn) return { loggedIn: false, user: host, reason: probe.reason };
     return { loggedIn: true, user: `IKEA Family (${host})` };
   };
 }
