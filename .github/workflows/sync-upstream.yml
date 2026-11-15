@@ -1,0 +1,98 @@
+name: Sync Upstream (feldorn/free-games-claimer)
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    outputs:
+      updated: ${{ steps.merge.outputs.updated }}
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Fetch and merge upstream feldorn/main
+        id: merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/feldorn/free-games-claimer.git 2>/dev/null \
+            || git remote set-url upstream https://github.com/feldorn/free-games-claimer.git
+          git fetch upstream main --tags
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with feldorn/main."
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          set +e
+          git merge --no-commit --no-ff upstream/main
+          MERGE_RC=$?
+          set -e
+
+          # Upstream ships CLAUDE.md; this fork uses AGENTS.md instead.
+          if git ls-files --error-unmatch CLAUDE.md >/dev/null 2>&1 || [ -f CLAUDE.md ]; then
+            git rm -f CLAUDE.md 2>/dev/null || true
+          fi
+
+          CONFLICTS=$(git diff --name-only --diff-filter=U)
+          if [ -n "$CONFLICTS" ] || [ $MERGE_RC -ne 0 -a -n "$CONFLICTS" ]; then
+            echo "Merge conflicts remain:"
+            echo "$CONFLICTS"
+            git merge --abort || true
+            UPSTREAM_SHA=$(git rev-parse --short upstream/main)
+            TITLE="Upstream sync conflict with feldorn/main ($UPSTREAM_SHA)"
+            OPEN_ISSUE=$(gh issue list --state open --search "Upstream sync conflict" --json number --jq '.[0].number // empty')
+            if [ -z "$OPEN_ISSUE" ]; then
+              gh issue create \
+                --title "$TITLE" \
+                --body "Automatic merge of \`feldorn/main\` (\`$UPSTREAM_SHA\`) hit conflicts in:\n\n\`\`\`\n$CONFLICTS\n\`\`\`\n\nResolve locally following \`AGENTS.md\` and push to \`main\`."
+            fi
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Verify every changed JS file parses cleanly before committing.
+          for f in $(git diff --cached --name-only -- '*.js'); do
+            if [ -f "$f" ]; then
+              node --check "$f"
+            fi
+          done
+
+          UPSTREAM_SHA=$(git rev-parse --short upstream/main)
+          git commit -m "chore: sync upstream feldorn/main ($UPSTREAM_SHA)"
+          git push origin main
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: sync
+    if: needs.sync.outputs.updated == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-publish.yml
+    secrets: inherit

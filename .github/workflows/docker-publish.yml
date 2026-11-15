@@ -10,6 +10,7 @@ on:
       - 'refactor/**'
     tags:
       - 'v*.*.*'
+  workflow_call:
   workflow_dispatch:
 
 # Cancel any in-progress run for the same branch when a new push lands.

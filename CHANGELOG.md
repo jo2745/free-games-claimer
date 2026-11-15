@@ -4,6 +4,28 @@ Release notes for the [free-games-claimer jo2745 fork](README.md). Most recent a
 
 ---
 
+## What's new in 2.12.38
+
+Fork-local, synced with `feldorn/main` (`v2.12.35`).
+
+- **DigitalCore balance capture fix** — `custom-website.js` previously
+  scanned only descendant elements (`el.querySelectorAll('*')`), which
+  returned an empty list when the selector matched a leaf `<span>`
+  (leaving `data/custom-balances.json` stuck on the old `4650` value).
+  Now falls back to `[el]` when `el` itself is a leaf node.
+- **IKEA Cloudflare challenge detection** — `checkLogin` and
+  `ikea-rewards.js` now also recognize Finnish `"Pieni hetki"` and
+  `/cdn-cgi/challenge` interstitials so a Cloudflare challenge isn't
+  misreported as a stale session.
+- **Automatic upstream sync workflow** — `.github/workflows/sync-upstream.yml`
+  runs every 6 hours (and via manual dispatch) to merge `feldorn/main`
+  into `main` (removing `CLAUDE.md` automatically, syntax-checking
+  changed `.js` files, opening an issue if a manual conflict occurs) and
+  triggers `docker-publish.yml` so `ghcr.io/jo2745/free-games-claimer:latest`
+  stays up to date with upstream releases plus fork additions.
+
+---
+
 ## What's new in 2.12.37
 
 Fork-local. Fixes the digitalcore balance mis-read (panel showed 4650;

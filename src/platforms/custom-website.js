@@ -159,7 +159,8 @@ for (const site of sites) {
           const candidates = await page.evaluate((sel) => {
             const el = document.querySelector(sel);
             if (!el) return null;
-            const leaves = [...el.querySelectorAll('*')].filter(n => !n.querySelector('*'));
+            const kids = [...el.querySelectorAll('*')].filter(n => !n.querySelector('*'));
+            const leaves = kids.length ? kids : [el];
             return leaves
               .map(n => ({ text: (n.textContent || '').trim(), visible: !!n.offsetParent }))
               .filter(x => x.text);

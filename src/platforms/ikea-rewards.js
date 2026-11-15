@@ -150,7 +150,7 @@ try {
   // never clears, this run is a NO-SIGNAL run — exit clean WITHOUT touching
   // the state file, so the saved baseline survives to the next run.
   const cfUp = () => page.evaluate(() =>
-    /just a moment/i.test(document.title) || /cdn-cgi\/challenge/i.test(location.href))
+    /just a moment|pieni hetki/i.test(document.title) || /cdn-cgi\/challenge/i.test(location.href))
     .catch(() => false);
   if (await cfUp()) {
     for (let retry = 0; retry < 2; retry++) {

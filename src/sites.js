@@ -245,7 +245,7 @@ function makeIkeaCheckLogin() {
     await page.waitForTimeout(1500).catch(() => {}); // React app mounts after first paint
     // CF interstitial still up? (title + canonical challenge-URL marker)
     const cfUp = () => page.evaluate(() =>
-      /just a moment/i.test(document.title) || !!document.getElementById('challenge-form'))
+      /just a moment|pieni hetki/i.test(document.title) || /cdn-cgi\/challenge/i.test(location.href) || !!document.getElementById('challenge-form'))
       .catch(() => false);
     if (await cfUp()) {
       for (let retry = 0; retry < 2; retry++) {
