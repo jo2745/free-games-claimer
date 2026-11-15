@@ -112,6 +112,32 @@ captcha grace, session-aware panel, etc. — see the mainline sections below).
 
 ---
 
+## What's new in 2.12.35
+
+**Epic: staying signed in between runs (#183).** On some accounts Epic stores its "remember me" login as a *session cookie*, one with no expiry date. Chromium deletes those every time it starts, so you could log in through the panel, see "Login verified", and still have the next run rejected by Epic (HTTP 401). The shared browser profile (the one Epic, Prime, GOG, Steam and the watchers use) is now set to "continue where you left off", which keeps session cookies across launches. Chromium is also stopped from saving open tabs in that profile, so old tabs don't come back and pile up run after run. This is set up automatically on the first launch after updating, and the log says "Browser profile: session cookies now kept across launches" once. If you were hit by the 401, log in to Epic once more from the Sessions tab. Thanks @miguelchico for the diagnosis and the tested workaround.
+
+**Epic: a failed screenshot no longer ends the Epic run (#183).** When a claim fails, the diagnostic screenshot could time out (for example behind an unsolved captcha), and that error stopped the whole Epic run, skipping the remaining games. Screenshots are now best-effort, capped at 15 seconds, and only log a warning if they fail.
+
+**Scheduler: a restart no longer skips a week, and an MS window change no longer skips today (#184).**
+- With a day-of-week filter (e.g. Thursdays only), the next run was found by adding the whole loop interval to today's start time and only then applying the filter. With a 7-day loop, a restart on Wednesday after the start time pushed the next run to Thursday *of the following week*. The scheduler now steps one day at a time and lets the day filter pick the day.
+- Moving the Microsoft Rewards window (say from 08:00 to 16:00) re-picked the run time for *tomorrow*, even when today's new window hadn't started yet. It now picks within today's window if there's still time.
+
+Thanks @amphoterism for both precise reports.
+
+**AliExpress: logged-out page recognised in every language (#185).** The redesigned coin page shows its login button with localized text ("Iniciar sesión") and no login link, so a logged-out session was reported as "page never finished loading". The login button is now matched by its class name, so you get a clear "log in once via the panel" message instead.
+
+---
+
+## What's new in 2.12.34
+
+**Microsoft Rewards: a hung browser can no longer freeze the run (#181).**
+
+Sometimes the browser page stops responding in the middle of the Bing searches. Playwright's own timeouts never fire when that happens, so the run sat on one search indefinitely: hours or days, until someone stopped it by hand.
+
+Each search now has its own time limit (4 minutes, or longer if you raised the page timeout in Advanced settings). If a search hits the limit, the page is treated as dead: the remaining searches are skipped, the browser is closed (and force-killed if it won't close within 30 seconds), and the end-of-run summary goes out, flagging that the desktop session stopped early so you can re-run Microsoft Rewards from the panel. A crashed browser tab ("Target crashed") now ends the searches straight away too, instead of being retried on the dead page.
+
+---
+
 ## What's new in 2.12.33
 
 **Epic: you now have 3 minutes to solve a captcha, not under one.**

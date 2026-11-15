@@ -6,6 +6,8 @@ import { chromium } from 'patchright';
 import { cleanProfileLocks, localeArgs, siteLocale, handleSIGINT, datetime, filenamify, log } from './util.js';
 import { cfg } from './config.js';
 import { SITES_BY_ID } from './sites.js'; // after config.js — sites.js reads cfg
+import { keepSessionCookies } from './profile-prefs.js';
+import path from 'node:path';
 
 // Shared browser-context factory. Every claim script used to repeat the same
 // preamble verbatim — cleanProfileLocks + launchPersistentContext with the same
@@ -40,6 +42,15 @@ export async function launchContext(siteId, {
   locale, // BCP-47 override (e.g. urlLocale(<rewards page URL>)) — wins over siteLocale(); keeps the context locale AND the --lang/--accept-lang flags in agreement (content-negotiating sites 302 onto the English page, and Cloudflare loops, when Accept-Language mismatches the page language)
 } = {}) {
   cleanProfileLocks(profileDir);
+  // The shared default profile (Epic, Prime, GOG, Steam, …) must keep session
+  // cookies across launches, or Epic's EPIC_SSO_RM / EPIC_SESSION_AP are gone
+  // by the next run (#183). It has to apply on every launch of this profile,
+  // not just Epic's: Prime/GOG run first and would drop them at their startup.
+  if (path.resolve(profileDir) === path.resolve(cfg.dir.browser)) {
+    const r = keepSessionCookies(profileDir);
+    if (r.error) log.warn(`Browser profile: could not enable session-cookie retention (${r.error})`);
+    else if (r.changed) console.log('Browser profile: session cookies now kept across launches (#183)');
+  }
   const loc = locale || siteLocale(siteId);
   const context = await chromium.launchPersistentContext(profileDir, {
     headless: cfg.headless,
