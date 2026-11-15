@@ -271,7 +271,7 @@ try {
 
   const balanceChanged = balance != null && state.balance != null && balance !== state.balance;
   const prevBalance = state.balance;
-  state.balance = balance;
+  if (balance != null) state.balance = balance;
 
   saveState(state);
   _summaryStats = { ..._summaryStats, onPage: acts.length, new: newActs.length };

@@ -2271,6 +2271,14 @@ function readCustomBalances() {
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   } catch { return {}; }
 }
+const IKEA_WATCH_FILE = dataDir('ikea-rewards-watch.json');
+function readIkeaBalance() {
+  try {
+    if (!existsSync(IKEA_WATCH_FILE)) return null;
+    const parsed = JSON.parse(readFileSync(IKEA_WATCH_FILE, 'utf8'));
+    return typeof parsed?.balance === 'number' && Number.isFinite(parsed.balance) ? parsed.balance : null;
+  } catch { return null; }
+}
 function recordLastRunSuccess(siteId, ts = datetime()) {
   if (!siteId) return;
   // Trim millisecond suffix so cards render "2026-05-06 09:13:43" not
@@ -3233,6 +3241,7 @@ async function getState() {
   // per-site Sessions cards). Fresh read per poll — the runner rewrites
   // the file on every run.
   const customBalances = readCustomBalances();
+  const ikeaBalance = readIkeaBalance();
 
   return {
     // v2.11.12: Web-UI auth state — the client refreshes AUTH_ENABLED
@@ -3251,6 +3260,7 @@ async function getState() {
       // hardcoded ID lists. Mirrors the registry value as-is.
       scheduleKind: site.scheduleKind || null,
       lastSuccessfulRun: lastRunSuccess[id] || null,
+      ...(id === 'ikea-rewards' ? { lastBalance: ikeaBalance } : {}),
       // External-link target for the Sessions card "↗" icon. homeUrl
       // (where the user actually wants to land — store landing page,
       // rewards dashboard, etc.) wins; loginUrl is the fallback for

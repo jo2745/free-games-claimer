@@ -9,6 +9,11 @@ Release notes for the [free-games-claimer jo2745 fork](README.md). Most recent a
 Fork-local, synced with `feldorn/main` (`v2.12.35`). Version follows
 upstream `X.Y.Z` with a fourth-part fork increment (`2.12.35.1`).
 
+- **IKEA points balance on Sessions card** — `panel.js` now reads
+  `data/ikea-rewards-watch.json` on each state poll and displays
+  `Balance N` on the IKEA Family Rewards card (matching DigitalCore),
+  and `ikea-rewards.js` preserves the last known balance if a run sees
+  no balance text.
 - **IKEA login & cookie-import verification fix** — `makeIkeaCheckLogin()`
   previously matched `[data-testid*="login"]` and `a[href*="/login"]`,
   which remain in IKEA's header even when logged in — causing both
