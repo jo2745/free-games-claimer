@@ -14,7 +14,9 @@ upstream `X.Y.Z` with a fourth-part fork increment (`2.12.35.1`).
   on `/favourites/` once every 7 days (`lastWishlistAt` in
   `data/ikea-rewards-watch.json`) using IKEA's `create-new-list` /
   `create-list-input` UI, and reads `[role="status"]` / `a[href*="/rewards"]`
-  first so catalog tier costs don't override the member's real points balance.
+  (falling back to `/rewards/` when the configured URL is the
+  `/ikea-family/benefits/rewards/` overview page, and ignoring `+N`
+  earn-rule tiles) so the member's real points balance is captured.
 - **IKEA points balance on Sessions card** — `panel.js` now reads
   `data/ikea-rewards-watch.json` on each state poll and displays
   `Balance N` on the IKEA Family Rewards card (matching DigitalCore),

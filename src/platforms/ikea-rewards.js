@@ -105,16 +105,17 @@ function loadState() {
   return { state: { balance: null, activities: {} }, hadBaseline: false };
 }
 
-function favouritesUrlFrom(rewardsUrl) {
+function ikeaLocaleUrl(rewardsUrl, subPath) {
   try {
     const u = new URL(rewardsUrl);
     const seg = u.pathname.split('/').filter(Boolean);
+    const clean = String(subPath || '').replace(/^\/+/, '');
     // Path-shaped (ikea.com/fi/fi/...) keeps the first two locale segments;
-    // TLD-shaped (ikea.lt/...) uses /favourites/ at root.
+    // TLD-shaped (ikea.lt/...) uses /<subPath> at root.
     if (/ikea\.com$/i.test(u.hostname) && seg.length >= 2 && /^[a-z]{2}$/i.test(seg[0]) && /^[a-z]{2}$/i.test(seg[1])) {
-      return `${u.origin}/${seg[0]}/${seg[1]}/favourites/`;
+      return `${u.origin}/${seg[0]}/${seg[1]}/${clean}`;
     }
-    return `${u.origin}/favourites/`;
+    return `${u.origin}/${clean}`;
   } catch {
     return null;
   }
@@ -124,7 +125,7 @@ const WISHLIST_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 async function maybeCreateWeeklyWishlist(page, rewardsUrl, state) {
   const lastAt = state.lastWishlistAt ? Date.parse(state.lastWishlistAt) : 0;
   if (lastAt && (Date.now() - lastAt) < WISHLIST_COOLDOWN_MS) return false;
-  const favUrl = favouritesUrlFrom(rewardsUrl);
+  const favUrl = ikeaLocaleUrl(rewardsUrl, 'favourites/');
   if (!favUrl) return false;
   try {
     await gotoWithRetry(page, favUrl, {
@@ -272,10 +273,11 @@ try {
         if (n >= 0 && n < 10_000_000) out.statusBalances.push({ n, text: t.slice(0, 100) });
       }
     }
-    // Fallback balance candidates: short text nodes "N piste/points…".
+    // Fallback balance candidates: short text nodes "N piste/points…",
+    // skipping "+N pistettä" earn-rule tiles.
     for (const el of document.querySelectorAll('div, span, p, h1, h2, h3, h4')) {
       const t = (el.textContent || '').trim();
-      if (t.length > 120) continue;
+      if (t.length > 120 || /^\s*\+/.test(t)) continue;
       const m = t.match(BALANCE_RE);
       if (m) {
         const n = parseInt(m[1].replace(/[\s\u00a0]/g, ''), 10);
@@ -299,6 +301,29 @@ try {
       }
     } catch (e) {
       log.warn(`Frame scan failed (${frame.url()?.split('/').slice(1, 2) || 'about:blank'}): ${e.message.split('\n')[0]}`);
+    }
+  }
+
+  // If the configured URL is the marketing page (/ikea-family/benefits/rewards/)
+  // rather than the member /rewards/ hub, [role="status"] isn't rendered there;
+  // hop to /rewards/ to read the real member points balance.
+  if (!statusBalances.length) {
+    const hubUrl = ikeaLocaleUrl(URL, 'rewards/');
+    if (hubUrl && hubUrl.replace(/\/+$/, '') !== URL.replace(/\/+$/, '')) {
+      try {
+        await gotoWithRetry(page, hubUrl, {
+          attempts: 2,
+          backoffMs: 3000,
+          gotoOpts: { waitUntil: 'domcontentloaded' },
+          siteId: 'ikea-rewards',
+          label: 'IKEA rewards hub',
+        });
+        await page.waitForTimeout(3000).catch(() => {});
+        const r = await scanFrame(page.mainFrame()).catch(() => null);
+        if (r?.statusBalances?.length) statusBalances = r.statusBalances;
+      } catch (e) {
+        log.warn(`Rewards hub balance check skipped: ${String(e.message || e).split('\n')[0]}`);
+      }
     }
   }
 
