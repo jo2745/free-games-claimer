@@ -105,6 +105,55 @@ function loadState() {
   return { state: { balance: null, activities: {} }, hadBaseline: false };
 }
 
+function favouritesUrlFrom(rewardsUrl) {
+  try {
+    const u = new URL(rewardsUrl);
+    const seg = u.pathname.split('/').filter(Boolean);
+    // Path-shaped (ikea.com/fi/fi/...) keeps the first two locale segments;
+    // TLD-shaped (ikea.lt/...) uses /favourites/ at root.
+    if (/ikea\.com$/i.test(u.hostname) && seg.length >= 2 && /^[a-z]{2}$/i.test(seg[0]) && /^[a-z]{2}$/i.test(seg[1])) {
+      return `${u.origin}/${seg[0]}/${seg[1]}/favourites/`;
+    }
+    return `${u.origin}/favourites/`;
+  } catch {
+    return null;
+  }
+}
+
+const WISHLIST_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+async function maybeCreateWeeklyWishlist(page, rewardsUrl, state) {
+  const lastAt = state.lastWishlistAt ? Date.parse(state.lastWishlistAt) : 0;
+  if (lastAt && (Date.now() - lastAt) < WISHLIST_COOLDOWN_MS) return false;
+  const favUrl = favouritesUrlFrom(rewardsUrl);
+  if (!favUrl) return false;
+  try {
+    await gotoWithRetry(page, favUrl, {
+      attempts: 2,
+      backoffMs: 3000,
+      gotoOpts: { waitUntil: 'domcontentloaded' },
+      siteId: 'ikea-rewards',
+      label: 'IKEA favourites',
+    });
+    const openBtn = page.locator('[data-testid="create-new-list"]').first();
+    await openBtn.waitFor({ state: 'visible', timeout: 10000 });
+    await openBtn.click();
+    const input = page.locator('[data-testid="create-list-input"]').first();
+    await input.waitFor({ state: 'visible', timeout: 8000 });
+    const listName = `Family ${datetime().slice(0, 10)}`;
+    await input.fill(listName);
+    const submitBtn = page.locator('[role="dialog"] button[class*="--primary"]').first();
+    await submitBtn.click();
+    await page.locator('[role="dialog"]').waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {});
+    await page.waitForTimeout(1500).catch(() => {});
+    state.lastWishlistAt = new Date().toISOString();
+    log.ok(`Created weekly IKEA favourites list "${listName}" (+2 points eligible)`);
+    return true;
+  } catch (e) {
+    log.warn(`Weekly IKEA favourites list skipped: ${String(e.message || e).split('\n')[0]}`);
+    return false;
+  }
+}
+
 function saveState(state) {
   try { writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); }
   catch (e) { log.warn(`Failed to save ikea-rewards watch state: ${e.message.split('\n')[0]}`); }
@@ -199,7 +248,7 @@ try {
     const ACTIVITY_RE = new RegExp(activityRe, 'i');
     const REDEEM_RE = new RegExp(redeemRe, 'i');
     const BALANCE_RE = new RegExp(balanceRe, 'i');
-    const out = { activities: [], balances: [] };
+    const out = { activities: [], balances: [], statusBalances: [] };
     // Activity candidates: buttons/links/CTA tiles whose text names an
     // earn-action and doesn't name a redeem-action.
     for (const el of document.querySelectorAll('button, a, [role="button"], [role="link"]')) {
@@ -210,10 +259,20 @@ try {
       const fp = 'act:' + text.toLowerCase().replace(/[^a-z0-9åäöü]+/g, ' ').replace(/\s+/g, ' ').trim();
       out.activities.push({ fp, text: text.slice(0, 80) });
     }
-    // Balance candidates: short text nodes "N piste/points…". Collect
-    // all; the runner takes the largest plausible (the catalog side
-    // shows redeem costs — small numbers — while the member balance
-    // is the big one, so max picks the balance).
+    // Primary member balance: [role="status"] ("Käytettävissä olevat
+    // pisteesi: 89 pistettä") or the rewards nav link ("IKEA Family
+    // -piste-edut, 89 pistettä"). Avoids picking catalog tier costs
+    // ("578 pistettä") when visiting /rewards/.
+    for (const el of document.querySelectorAll('[role="status"], a[href*="/rewards"]')) {
+      const t = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).replace(/\s+/g, ' ').trim();
+      if (!t || t.length > 160) continue;
+      const m = t.match(BALANCE_RE);
+      if (m) {
+        const n = parseInt(m[1].replace(/[\s\u00a0]/g, ''), 10);
+        if (n >= 0 && n < 10_000_000) out.statusBalances.push({ n, text: t.slice(0, 100) });
+      }
+    }
+    // Fallback balance candidates: short text nodes "N piste/points…".
     for (const el of document.querySelectorAll('div, span, p, h1, h2, h3, h4')) {
       const t = (el.textContent || '').trim();
       if (t.length > 120) continue;
@@ -229,10 +288,15 @@ try {
   const frames = [page.mainFrame(), ...page.frames().filter(f => f !== page.mainFrame())];
   let activities = [];
   let balances = [];
+  let statusBalances = [];
   for (const frame of frames) {
     try {
       const r = await scanFrame(frame);
-      if (r) { activities = activities.concat(r.activities || []); balances = balances.concat(r.balances || []); }
+      if (r) {
+        activities = activities.concat(r.activities || []);
+        balances = balances.concat(r.balances || []);
+        statusBalances = statusBalances.concat(r.statusBalances || []);
+      }
     } catch (e) {
       log.warn(`Frame scan failed (${frame.url()?.split('/').slice(1, 2) || 'about:blank'}): ${e.message.split('\n')[0]}`);
     }
@@ -243,9 +307,9 @@ try {
   const actMap = new Map();
   for (const a of activities) if (!actMap.has(a.fp)) actMap.set(a.fp, a);
   const acts = [...actMap.values()];
-  const balance = balances.length
-    ? balances.sort((a, b) => b.n - a.n)[0].n // max = the member balance
-    : null;
+  const balance = statusBalances.length
+    ? statusBalances[0].n
+    : (balances.length ? balances.sort((a, b) => b.n - a.n)[0].n : null);
 
   log.status('Activities on page', acts.length);
   if (balance != null) log.status('Points balance', balance);
@@ -272,6 +336,9 @@ try {
   const balanceChanged = balance != null && state.balance != null && balance !== state.balance;
   const prevBalance = state.balance;
   if (balance != null) state.balance = balance;
+
+  // Weekly +2 points: create and save a favourites list once every 7 days.
+  await maybeCreateWeeklyWishlist(page, URL, state);
 
   saveState(state);
   _summaryStats = { ..._summaryStats, onPage: acts.length, new: newActs.length };

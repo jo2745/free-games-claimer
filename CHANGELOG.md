@@ -9,6 +9,12 @@ Release notes for the [free-games-claimer jo2745 fork](README.md). Most recent a
 Fork-local, synced with `feldorn/main` (`v2.12.35`). Version follows
 upstream `X.Y.Z` with a fourth-part fork increment (`2.12.35.1`).
 
+- **IKEA weekly favourites list (+2 pts) & accurate balance** —
+  `ikea-rewards.js` now creates a weekly favourites list (`Family YYYY-MM-DD`)
+  on `/favourites/` once every 7 days (`lastWishlistAt` in
+  `data/ikea-rewards-watch.json`) using IKEA's `create-new-list` /
+  `create-list-input` UI, and reads `[role="status"]` / `a[href*="/rewards"]`
+  first so catalog tier costs don't override the member's real points balance.
 - **IKEA points balance on Sessions card** — `panel.js` now reads
   `data/ikea-rewards-watch.json` on each state poll and displays
   `Balance N` on the IKEA Family Rewards card (matching DigitalCore),

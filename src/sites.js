@@ -270,6 +270,7 @@ function makeIkeaCheckLogin() {
       const logoutRe = /\b(log\s*out|sign\s*out|kirjaudu\s+ulos|logga\s+ut|abmelden|cerrar\s+sesi[oó]n|d[eé]connexion|esci|wyloguj|uitloggen)\b/i;
       const loginRe = /\b(kirjaudu\s+sis[äa]{2}n|log\s*in|sign\s*in|logga\s+in|inlogg[a-z]*|anmelden|se\s+connecter|iniciar\s+sesi[oó]n|accedi|inloggen|logg\s+in)\b/i;
       const balanceRe = /\d[\d\s\u00a0]{0,9}\s*(?:points?|pts?|piste(?:et|tt[äa]|it[äa])?|po[äa]ng|punkte|punti|puntos|punten|punkty|bod[ůy]|pont)/i;
+      if (document.querySelector('a[href*="/logout" i]')) return { loggedIn: true };
       for (const el of document.querySelectorAll('button, a, [role="button"], [role="link"]')) {
         if (!isVisible(el)) continue;
         const text = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).replace(/\s+/g, ' ').trim();
@@ -280,6 +281,7 @@ function makeIkeaCheckLogin() {
         const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
         if (text && text.length <= 80 && balanceRe.test(text)) return { loggedIn: true };
       }
+      if (document.querySelector('a[href*="/logout" i]')) return { loggedIn: true };
       for (const el of document.querySelectorAll('button, a, [role="button"], [role="link"]')) {
         if (!isVisible(el)) continue;
         const text = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).replace(/\s+/g, ' ').trim();
